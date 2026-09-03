@@ -369,7 +369,7 @@ async function processExcelFile(file) {
     const validDates = [];
     
     // Per ciascun blocco settimanale contenente Giusy
-    for (const gRow of giusyRows) {
+    giusyRows.forEach((gRow, gIdx) => {
       // Trova la riga di intestazione settimanale immediatamente precedente
       const wRow = weekHeaderRows.filter(w => w < gRow).pop() || (gRow - 39);
       
@@ -430,6 +430,8 @@ async function processExcelFile(file) {
         parsedShifts[dateKey] = {
           date: dateKey,
           dayName: dDef.name,
+          weekIndex: gIdx + 1,
+          weekLabel: `Settimana ${gIdx + 1}`,
           hasWork,
           isRiposo,
           isApertura,
@@ -452,38 +454,133 @@ async function processExcelFile(file) {
           validDates.push(dayDate);
         }
       });
-    }
+    });
     
-    // Calcolo periodo iniziale e finale
-    let periodStart = null;
-    let periodEnd = null;
-    if (validDates.length > 0) {
-      validDates.sort((a, b) => a.getTime() - b.getTime());
-      periodStart = formatDateKey(validDates[0]);
-      periodEnd = formatDateKey(validDates[validDates.length - 1]);
-      
-      // Imposta il mese visualizzato sul primo mese con turni
-      APP_STATE.currentDate = new Date(validDates[0].getFullYear(), validDates[0].getMonth(), 1);
-    }
-    
-    const payload = {
-      person: "Giusy de Santis",
-      fileName: file.name,
-      lastUpdate: new Date().toISOString(),
-      periodStart,
-      periodEnd,
-      totalWeeks: giusyRows.length,
-      shiftsData: parsedShifts
-    };
-    
-    // Applica i dati all'applicazione
-    applyParsedData(payload, true);
-    showToast("Turni di Giusy de Santis importati con successo!");
+    // Gestione unione dati e verifica conflitti mese già memorizzato
+    handleIncomingShifts(parsedShifts, file.name, giusyRows.length);
     
   } catch (err) {
     console.error("Errore elaborazione Excel:", err);
     alert(`Errore durante l'acquisizione del file: ${err.message}`);
   }
+}
+
+// Stato per importazione in attesa di conferma dall'utente
+let pendingImport = null;
+
+/**
+ * Gestisce l'aggiunta dei turni o la richiesta di sostituzione se il mese è già presente
+ */
+function handleIncomingShifts(incomingShifts, fileName, giusyRowsCount) {
+  const incomingDateKeys = Object.keys(incomingShifts);
+  if (incomingDateKeys.length === 0) {
+    showToast("Nessun turno valido trovato nel file.");
+    return;
+  }
+
+  // Identifica i mesi presenti nel nuovo file (formato "YYYY-MM")
+  const incomingMonthKeys = Array.from(new Set(incomingDateKeys.map(d => d.slice(0, 7))));
+  
+  // Identifica i mesi già memorizzati nei dati correnti dell'app
+  const existingDateKeys = Object.keys(APP_STATE.shiftsData || {});
+  const existingMonthKeys = new Set(existingDateKeys.map(d => d.slice(0, 7)));
+
+  // Trova i mesi in conflitto che hanno già almeno 3 turni registrati
+  const conflictingMonths = incomingMonthKeys.filter(m => {
+    if (!existingMonthKeys.has(m)) return false;
+    const countInMonth = existingDateKeys.filter(d => d.startsWith(m)).length;
+    return countInMonth >= 3;
+  });
+
+  if (conflictingMonths.length > 0) {
+    // Mese già memorizzato: chiedi conferma prima di sostituire
+    pendingImport = {
+      incomingShifts,
+      fileName,
+      totalWeeks: giusyRowsCount,
+      conflictingMonths
+    };
+    showConflictModal(conflictingMonths);
+  } else {
+    // Mese nuovo: aggiungi direttamente ai dati già memorizzati in precedenza
+    executeImportMerge(incomingShifts, [], fileName, giusyRowsCount);
+    showToast("Nuovi turni aggiunti con successo a quelli già memorizzati!");
+  }
+}
+
+function showConflictModal(conflictingMonths) {
+  const monthNamesIt = [
+    "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
+  ];
+  
+  const formattedMonths = conflictingMonths.map(mStr => {
+    const [y, m] = mStr.split("-").map(Number);
+    return `${monthNamesIt[m - 1]} ${y}`;
+  }).join(" e ");
+
+  const msgEl = document.getElementById("conflictModalMsg");
+  if (msgEl) {
+    msgEl.innerHTML = `I dati caricati contengono turni per <strong>${formattedMonths}</strong>, che risultano già memorizzati in precedenza.<br><br>Vuoi <strong>sostituire i dati di ${formattedMonths}</strong> con quelli del nuovo file oppure annullare l'operazione?`;
+  }
+
+  document.getElementById("conflictModal").classList.add("active");
+}
+
+function closeConflictModal() {
+  document.getElementById("conflictModal").classList.remove("active");
+  pendingImport = null;
+}
+
+/**
+ * Esegue l'unione dei nuovi turni con quelli preesistenti
+ * Se specificato replaceMonths, rimuove solo i turni di quei mesi prima di aggiungere i nuovi
+ */
+function executeImportMerge(incomingShifts, replaceMonths = [], fileName = "import.xlsx", totalWeeks = 0) {
+  // Inizia con una copia dei dati già memorizzati in precedenza
+  const merged = { ...APP_STATE.shiftsData };
+
+  // Se è richiesta la sostituzione di determinati mesi, cancella solo le date di quei mesi
+  if (replaceMonths.length > 0) {
+    const replaceSet = new Set(replaceMonths);
+    Object.keys(merged).forEach(dateKey => {
+      if (replaceSet.has(dateKey.slice(0, 7))) {
+        delete merged[dateKey];
+      }
+    });
+  }
+
+  // Aggiungi tutti i turni del file caricato
+  Object.assign(merged, incomingShifts);
+
+  // Ricalcola il periodo complessivo (Data Inizio e Data Fine su tutti i turni lavorati)
+  const allWorkingDates = Object.values(merged)
+    .filter(s => s.hasWork && s.date)
+    .map(s => s.date)
+    .sort();
+
+  const periodStart = allWorkingDates.length > 0 ? allWorkingDates[0] : null;
+  const periodEnd = allWorkingDates.length > 0 ? allWorkingDates[allWorkingDates.length - 1] : null;
+
+  // Centra il calendario sul mese principale dei turni appena caricati
+  const incomingDates = Object.keys(incomingShifts).sort();
+  if (incomingDates.length > 0) {
+    const midDate = incomingDates[Math.floor(incomingDates.length / 2)];
+    const [y, m] = midDate.split("-").map(Number);
+    APP_STATE.currentDate = new Date(y, m - 1, 1);
+  }
+
+  const payload = {
+    person: "Giusy de Santis",
+    fileName,
+    lastUpdate: new Date().toISOString(),
+    periodStart,
+    periodEnd,
+    totalWeeks: Math.max(totalWeeks, Math.ceil(Object.keys(merged).length / 7)),
+    shiftsData: merged
+  };
+
+  applyParsedData(payload, true);
 }
 
 function applyParsedData(payload, shouldSyncCloud = true) {
@@ -785,6 +882,393 @@ document.getElementById("btnCloseSettings").addEventListener("click", () => {
 document.getElementById("settingsModal").addEventListener("click", (e) => {
   if (e.target === document.getElementById("settingsModal")) {
     document.getElementById("settingsModal").classList.remove("active");
+  }
+});
+
+// =============================================================================
+// 8.1 STATISTICHE & GRAFICI INTERATTIVI (Version 1.1.0)
+// =============================================================================
+
+APP_STATE.statsScope = "month"; // "month" oppure "all"
+
+function openStatsModal() {
+  renderStatistics();
+  document.getElementById("statsModal").classList.add("active");
+}
+
+function closeStatsModal() {
+  document.getElementById("statsModal").classList.remove("active");
+}
+
+function setStatsScope(scope) {
+  APP_STATE.statsScope = scope;
+  document.getElementById("btnScopeMonth").classList.toggle("active", scope === "month");
+  document.getElementById("btnScopeAll").classList.toggle("active", scope === "all");
+  renderStatistics();
+}
+
+function getFilteredShiftsForStats() {
+  const allShifts = Object.values(APP_STATE.shiftsData);
+  if (APP_STATE.statsScope === "all") {
+    return allShifts;
+  }
+  // Filtra solo per il mese attualmente visualizzato
+  const y = APP_STATE.currentDate.getFullYear();
+  const m = APP_STATE.currentDate.getMonth() + 1;
+  return allShifts.filter(s => {
+    if (!s.date) return false;
+    const [shiftY, shiftM] = s.date.split("-").map(Number);
+    return shiftY === y && shiftM === m;
+  });
+}
+
+function computeStatistics() {
+  const shifts = getFilteredShiftsForStats();
+  
+  let totalHours = 0;
+  let workDaysCount = 0;
+  let restDaysCount = 0;
+  let openingsCount = 0;
+  let closingsCount = 0;
+  let regularCount = 0;
+  let weekendShiftsCount = 0;
+  
+  const daysMap = {
+    "Lunedì":    { name: "Lunedì", short: "Lun", count: 0, hours: 0, isWeekend: false },
+    "Martedì":   { name: "Martedì", short: "Mar", count: 0, hours: 0, isWeekend: false },
+    "Mercoledì": { name: "Mercoledì", short: "Mer", count: 0, hours: 0, isWeekend: false },
+    "Giovedì":   { name: "Giovedì", short: "Gio", count: 0, hours: 0, isWeekend: false },
+    "Venerdì":   { name: "Venerdì", short: "Ven", count: 0, hours: 0, isWeekend: false },
+    "Sabato":    { name: "Sabato", short: "Sab", count: 0, hours: 0, isWeekend: true },
+    "Domenica":  { name: "Domenica", short: "Dom", count: 0, hours: 0, isWeekend: true }
+  };
+
+  const weeksMap = {};
+  const specialShifts = [];
+
+  shifts.forEach(s => {
+    const h = s.totalHours || 0;
+    const isSpecial = s.isApertura || s.isChiusura;
+    
+    if (s.isRiposo) {
+      restDaysCount++;
+    } else {
+      workDaysCount++;
+      totalHours += h;
+      if (s.isApertura) openingsCount++;
+      if (s.isChiusura) closingsCount++;
+      if (!isSpecial) regularCount++;
+
+      // Giorno della settimana
+      const dName = s.dayName || "Domenica";
+      if (daysMap[dName]) {
+        daysMap[dName].count++;
+        daysMap[dName].hours += h;
+        if (daysMap[dName].isWeekend) weekendShiftsCount++;
+      }
+      
+      if (isSpecial) {
+        specialShifts.push(s);
+      }
+    }
+
+    // Raggruppamento per settimana
+    const wKey = s.weekLabel || `Settimana ${s.weekIndex || 1}`;
+    if (!weeksMap[wKey]) {
+      weeksMap[wKey] = {
+        label: wKey,
+        shortLabel: wKey.replace("Settimana ", "S."),
+        totalHours: 0,
+        workDays: 0,
+        restDays: 0,
+        openings: 0,
+        closings: 0,
+        shifts: []
+      };
+    }
+    weeksMap[wKey].shifts.push(s);
+    if (s.isRiposo) {
+      weeksMap[wKey].restDays++;
+    } else {
+      weeksMap[wKey].workDays++;
+      weeksMap[wKey].totalHours += h;
+      if (s.isApertura) weeksMap[wKey].openings++;
+      if (s.isChiusura) weeksMap[wKey].closings++;
+    }
+  });
+
+  const weeksList = Object.values(weeksMap);
+  const totalWeeks = Math.max(1, weeksList.length);
+  const avgWeeklyHours = (totalHours / totalWeeks).toFixed(1);
+
+  // Ordina turni speciali per data
+  specialShifts.sort((a, b) => a.date.localeCompare(b.date));
+
+  return {
+    totalHours,
+    workDaysCount,
+    restDaysCount,
+    openingsCount,
+    closingsCount,
+    regularCount,
+    weekendShiftsCount,
+    avgWeeklyHours,
+    totalDays: shifts.length,
+    weeksList,
+    daysList: Object.values(daysMap),
+    specialShifts
+  };
+}
+
+function renderStatistics() {
+  const stats = computeStatistics();
+  const isMonth = APP_STATE.statsScope === "month";
+  
+  // Sottotitolo
+  const subtitle = document.getElementById("statsSubtitle");
+  if (subtitle) {
+    if (isMonth) {
+      const monthNames = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno", "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"];
+      subtitle.textContent = `Mese di ${monthNames[APP_STATE.currentDate.getMonth()]} ${APP_STATE.currentDate.getFullYear()}`;
+    } else {
+      subtitle.textContent = `Tutti i turni importati (${stats.totalDays} giornate analizzate)`;
+    }
+  }
+
+  // 1. Aggiorna KPI Cards
+  document.getElementById("kpiTotalHours").textContent = `${stats.totalHours}h`;
+  document.getElementById("kpiAvgWeekly").textContent = `${stats.avgWeeklyHours}h`;
+  document.getElementById("kpiRestDays").textContent = `${stats.restDaysCount} gg`;
+  document.getElementById("kpiOpenings").textContent = stats.openingsCount;
+  document.getElementById("kpiClosings").textContent = stats.closingsCount;
+  document.getElementById("kpiWeekendShifts").textContent = stats.weekendShiftsCount;
+
+  // 2. Grafico Distribuzione Turni (Progress bar)
+  const totalDays = Math.max(1, stats.totalDays);
+  const pctRiposo = Math.round((stats.restDaysCount / totalDays) * 100);
+  const specialCount = stats.openingsCount + stats.closingsCount;
+  const pctSpeciale = Math.round((specialCount / totalDays) * 100);
+  const pctNormale = Math.max(0, 100 - pctRiposo - pctSpeciale);
+
+  const segRiposo = document.getElementById("segRiposo");
+  const segSpeciale = document.getElementById("segSpeciale");
+  const segNormale = document.getElementById("segNormale");
+  
+  if (segRiposo) segRiposo.style.width = `${pctRiposo}%`;
+  if (segSpeciale) segSpeciale.style.width = `${pctSpeciale}%`;
+  if (segNormale) segNormale.style.width = `${pctNormale}%`;
+
+  document.getElementById("legendRiposoVal").textContent = `${stats.restDaysCount} (${pctRiposo}%)`;
+  document.getElementById("legendSpecialeVal").textContent = `${specialCount} (${pctSpeciale}%)`;
+  document.getElementById("legendNormaleVal").textContent = `${stats.regularCount} (${pctNormale}%)`;
+
+  // 3. Grafico Ore per Settimana (SVG Bar Chart)
+  renderWeeklyHoursChartSvg(stats.weeksList);
+
+  // 4. Grafico Frequenza per Giorno della Settimana (SVG Bar Chart)
+  renderDayFrequencyChartSvg(stats.daysList);
+
+  // 5. Tabella Settimanale
+  renderWeeklyStatsTable(stats.weeksList);
+
+  // 6. Elenco Aperture & Chiusure
+  renderSpecialShiftsList(stats.specialShifts);
+}
+
+function renderWeeklyHoursChartSvg(weeks) {
+  const container = document.getElementById("weeklyHoursChart");
+  if (!container) return;
+
+  if (!weeks || weeks.length === 0) {
+    container.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 24px;">Nessun dato settimanale disponibile per questo periodo.</div>`;
+    return;
+  }
+
+  const width = 340;
+  const height = 175;
+  const padBottom = 28;
+  const padTop = 26;
+  const padLeft = 36;
+  const padRight = 16;
+  const chartHeight = height - padTop - padBottom;
+  const chartWidth = width - padLeft - padRight;
+
+  const maxHours = Math.max(26, ...weeks.map(w => w.totalHours || 0));
+  const slotWidth = chartWidth / weeks.length;
+  const barWidth = Math.min(34, Math.floor(slotWidth * 0.65));
+
+  // Linea target 20 ore contrattuali
+  const targetY = padTop + chartHeight - ((20 / maxHours) * chartHeight);
+  const targetLineSvg = `
+    <line x1="${padLeft}" y1="${targetY}" x2="${width - padRight}" y2="${targetY}" class="chart-target-line" />
+    <text x="${width - padRight}" y="${targetY - 5}" class="chart-target-label" text-anchor="end">Contratto 20h</text>
+  `;
+
+  // Linee di riferimento
+  const gridLevels = [10, 20];
+  const gridSvg = gridLevels.map(lvl => {
+    const y = padTop + chartHeight - ((lvl / maxHours) * chartHeight);
+    return `
+      <line x1="${padLeft}" y1="${y}" x2="${width - padRight}" y2="${y}" class="chart-grid-line" />
+      <text x="${padLeft - 6}" y="${y + 3}" class="chart-label-text" text-anchor="end">${lvl}h</text>
+    `;
+  }).join("");
+
+  // Barre delle settimane
+  const barsSvg = weeks.map((w, idx) => {
+    const x = padLeft + (idx * slotWidth) + (slotWidth - barWidth) / 2;
+    const h = ((w.totalHours || 0) / maxHours) * chartHeight;
+    const y = padTop + chartHeight - h;
+    const color = (w.totalHours >= 20) ? "var(--brand-primary)" : "#6366f1";
+    
+    return `
+      <rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="4" fill="${color}" class="chart-bar-rect">
+        <title>${w.label}: ${w.totalHours} ore</title>
+      </rect>
+      <text x="${x + barWidth / 2}" y="${y - 6}" class="chart-val-text">${w.totalHours}h</text>
+      <text x="${x + barWidth / 2}" y="${height - 8}" class="chart-label-text">${w.shortLabel}</text>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="chart-svg">
+      ${gridSvg}
+      ${targetLineSvg}
+      ${barsSvg}
+    </svg>
+  `;
+}
+
+function renderDayFrequencyChartSvg(days) {
+  const container = document.getElementById("dayFrequencyChart");
+  if (!container) return;
+
+  if (!days || days.length === 0) {
+    container.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 24px;">Nessun dato disponibile.</div>`;
+    return;
+  }
+
+  const width = 340;
+  const height = 155;
+  const padBottom = 26;
+  const padTop = 22;
+  const padLeft = 24;
+  const padRight = 16;
+  const chartHeight = height - padTop - padBottom;
+  const chartWidth = width - padLeft - padRight;
+
+  const maxCount = Math.max(4, ...days.map(d => d.count || 0));
+  const slotWidth = chartWidth / days.length;
+  const barWidth = Math.min(26, Math.floor(slotWidth * 0.65));
+
+  const barsSvg = days.map((d, idx) => {
+    const x = padLeft + (idx * slotWidth) + (slotWidth - barWidth) / 2;
+    const h = ((d.count || 0) / maxCount) * chartHeight;
+    const y = padTop + chartHeight - h;
+    const color = d.isWeekend ? "#8b5cf6" : "var(--brand-primary)";
+
+    return `
+      <rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="3" fill="${color}" class="chart-bar-rect">
+        <title>${d.name}: ${d.count} turni (${d.hours} ore)</title>
+      </rect>
+      <text x="${x + barWidth / 2}" y="${y - 5}" class="chart-val-text">${d.count}</text>
+      <text x="${x + barWidth / 2}" y="${height - 8}" class="chart-label-text">${d.short}</text>
+    `;
+  }).join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="chart-svg">
+      <line x1="${padLeft}" y1="${padTop + chartHeight}" x2="${width - padRight}" y2="${padTop + chartHeight}" stroke="var(--border-color)" />
+      ${barsSvg}
+    </svg>
+  `;
+}
+
+function renderWeeklyStatsTable(weeks) {
+  const tbody = document.getElementById("weeklyStatsTbody");
+  if (!tbody) return;
+
+  if (!weeks || weeks.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 16px;">Nessuna settimana presente</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = weeks.map(w => {
+    return `
+      <tr>
+        <td style="font-weight: 700; color: var(--brand-primary);">${w.label}</td>
+        <td><span class="hours-pill" style="font-size: 0.75rem;">${w.totalHours}h</span></td>
+        <td>${w.workDays} gg</td>
+        <td><span style="color: var(--riposo-badge); font-weight: 700;">${w.restDays}</span></td>
+        <td><span style="color: var(--speciale-badge); font-weight: 700;">${w.openings}</span></td>
+        <td><span style="color: #ef4444; font-weight: 700;">${w.closings}</span></td>
+      </tr>
+    `;
+  }).join("");
+}
+
+function renderSpecialShiftsList(shifts) {
+  const container = document.getElementById("specialShiftsList");
+  if (!container) return;
+
+  if (!shifts || shifts.length === 0) {
+    container.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 16px;">Nessuna apertura o chiusura presente nel periodo selezionato.</div>`;
+    return;
+  }
+
+  container.innerHTML = shifts.map(s => {
+    let badgeHtml = "";
+    if (s.isApertura && s.isChiusura) {
+      badgeHtml = `<span class="day-badge-tag tag-apertura">Apertura</span> <span class="day-badge-tag tag-chiusura">Chiusura</span>`;
+    } else if (s.isApertura) {
+      badgeHtml = `<span class="day-badge-tag tag-apertura">Apertura (≤ 9:30)</span>`;
+    } else {
+      badgeHtml = `<span class="day-badge-tag tag-chiusura">Chiusura (≥ 21:00)</span>`;
+    }
+
+    return `
+      <div class="special-shift-card">
+        <div class="special-shift-left">
+          <span class="special-shift-date">${formatItalianDate(s.date)} (${s.dayName})</span>
+          <span class="special-shift-hours">${s.startTime} — ${s.endTime} (${s.totalHours} ore)</span>
+        </div>
+        <div>${badgeHtml}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+// Event Listeners per Statistiche
+document.getElementById("btnOpenStats").addEventListener("click", openStatsModal);
+document.getElementById("btnCloseStats").addEventListener("click", closeStatsModal);
+
+document.getElementById("statsModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("statsModal")) {
+    closeStatsModal();
+  }
+});
+
+document.getElementById("btnScopeMonth").addEventListener("click", () => setStatsScope("month"));
+document.getElementById("btnScopeAll").addEventListener("click", () => setStatsScope("all"));
+
+// Event Listeners per Gestione Conflitti Mese già Memorizzato
+document.getElementById("btnConfirmReplaceMonth").addEventListener("click", () => {
+  if (pendingImport) {
+    const { incomingShifts, conflictingMonths, fileName, totalWeeks } = pendingImport;
+    executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks);
+    closeConflictModal();
+    showToast("Turni del mese sostituiti con successo!");
+  }
+});
+
+document.getElementById("btnCancelReplaceMonth").addEventListener("click", () => {
+  closeConflictModal();
+  showToast("Importazione annullata. I dati esistenti sono stati mantenuti.");
+});
+
+document.getElementById("conflictModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("conflictModal")) {
+    closeConflictModal();
   }
 });
 

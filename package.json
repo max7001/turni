@@ -1,0 +1,18 @@
+{
+  "name": "gestione-orari-giusy",
+  "version": "1.0.0",
+  "description": "Webapp mobile per la gestione turni di lavoro di Giusy de Santis",
+  "scripts": {
+    "start": "ruby -run -e httpd . -p 3000"
+  },
+  "keywords": [
+    "turni",
+    "orari",
+    "pwa",
+    "excel",
+    "firebase",
+    "vercel"
+  ],
+  "author": "",
+  "license": "ISC"
+}

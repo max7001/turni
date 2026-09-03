@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff" id="metaThemeColor">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Orari Lavoro">
+  <meta name="description" content="Gestione turni e orari di lavoro per Giusy de Santis">
+  
+  <title>Orari Lavoro - Giusy de Santis</title>
+  
+  <link rel="manifest" href="./manifest.json">
+  <link rel="stylesheet" href="./styles.css">
+  
+  <!-- SheetJS Library (local vendor with CDN fallback) -->
+  <script src="./vendor/xlsx.full.min.js"></script>
+  <script>
+    if (typeof XLSX === 'undefined') {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
+      document.head.appendChild(script);
+    }
+  </script>
+</head>
+<body>
+
+  <!-- =========================================================================
+       1. SCHERMATA DI ACCESSO PROTETTO (PIN LOCK)
+       ========================================================================= -->
+  <div id="lockScreen" class="lock-screen" style="display: none;">
+    <div class="lock-shield-icon">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+    </div>
+    
+    <h1 class="lock-title">Accesso Sicuro</h1>
+    <p class="lock-subtitle">Inserisci il codice di accesso per visualizzare i turni di lavoro</p>
+    
+    <div class="pin-dots-container" id="pinDots">
+      <div class="pin-dot"></div>
+      <div class="pin-dot"></div>
+      <div class="pin-dot"></div>
+      <div class="pin-dot"></div>
+      <div class="pin-dot"></div>
+      <div class="pin-dot"></div>
+    </div>
+    
+    <div class="pin-keypad">
+      <button type="button" class="keypad-btn" data-key="1">1</button>
+      <button type="button" class="keypad-btn" data-key="2">2</button>
+      <button type="button" class="keypad-btn" data-key="3">3</button>
+      <button type="button" class="keypad-btn" data-key="4">4</button>
+      <button type="button" class="keypad-btn" data-key="5">5</button>
+      <button type="button" class="keypad-btn" data-key="6">6</button>
+      <button type="button" class="keypad-btn" data-key="7">7</button>
+      <button type="button" class="keypad-btn" data-key="8">8</button>
+      <button type="button" class="keypad-btn" data-key="9">9</button>
+      <button type="button" class="keypad-btn action-btn" id="btnPinClear">C</button>
+      <button type="button" class="keypad-btn" data-key="0">0</button>
+      <button type="button" class="keypad-btn action-btn" id="btnPinBackspace">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path>
+          <line x1="18" y1="9" x2="12" y2="15"></line>
+          <line x1="12" y1="9" x2="18" y2="15"></line>
+        </svg>
+      </button>
+    </div>
+    
+    <div id="pinErrorMsg" class="pin-error-msg"></div>
+  </div>
+
+
+  <!-- =========================================================================
+       2. SCHERMATA PRINCIPALE DELL'APPLICAZIONE
+       ========================================================================= -->
+  <div id="mainApp" class="app-container" style="display: none;">
+    
+    <!-- Top Bar -->
+    <header class="top-bar">
+      <div class="top-bar-header">
+        <div class="user-info">
+          <div class="user-name">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+              <circle cx="12" cy="7" r="4"></circle>
+            </svg>
+            <span>Giusy de Santis</span>
+          </div>
+          <span class="role-badge">Orari & Turni di Lavoro</span>
+        </div>
+        
+        <div class="top-actions">
+          <!-- Hidden file input for Excel upload -->
+          <input type="file" id="excelFileInput" accept=".xlsx, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="display: none;">
+          
+          <!-- Carica Button -->
+          <button type="button" class="icon-btn icon-btn-primary" id="btnUploadExcel" title="Carica file orari Excel (.xlsx)">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+          </button>
+          
+          <!-- Impostazioni Button -->
+          <button type="button" class="icon-btn" id="btnOpenSettings" title="Impostazioni applicazione">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+      </div>
+      
+      <!-- Periodo Iniziale e Finale dei Turni Importati (In alto nella schermata) -->
+      <div class="period-banner" id="periodBanner">
+        <div class="period-left">
+          <div class="period-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect width="18" height="18" x="3" y="4" rx="2" ry="2"></rect>
+              <line x1="16" y1="2" x2="16" y2="6"></line>
+              <line x1="8" y1="2" x2="8" y2="6"></line>
+              <line x1="3" y1="10" x2="21" y2="10"></line>
+            </svg>
+          </div>
+          <div class="period-details">
+            <span class="period-title">Periodo Turni Importati</span>
+            <span class="period-dates" id="periodDatesLabel">Nessun file caricato</span>
+          </div>
+        </div>
+        <div class="status-pill" id="periodStatusPill">In attesa</div>
+      </div>
+    </header>
+
+    <!-- Legenda Colori -->
+    <div class="legend-bar">
+      <div class="legend-item">
+        <span class="legend-dot riposo"></span>
+        <span>Riposo (Verde)</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-dot apertura-chiusura"></span>
+        <span>Apertura / Chiusura (Giallo)</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-dot normale"></span>
+        <span>Turno Regolare</span>
+      </div>
+    </div>
+
+    <!-- Navigazione Mese -->
+    <div class="month-nav">
+      <button type="button" class="nav-arrow-btn" id="btnPrevMonth" aria-label="Mese precedente">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+      </button>
+      
+      <div class="month-title" id="currentMonthLabel">Settembre 2026</div>
+      
+      <button type="button" class="nav-arrow-btn" id="btnNextMonth" aria-label="Mese successivo">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Griglia Calendario Mensile -->
+    <main class="calendar-wrapper">
+      <div class="weekdays-grid">
+        <div class="weekday-col">Lun</div>
+        <div class="weekday-col">Mar</div>
+        <div class="weekday-col">Mer</div>
+        <div class="weekday-col">Gio</div>
+        <div class="weekday-col">Ven</div>
+        <div class="weekday-col">Sab</div>
+        <div class="weekday-col">Dom</div>
+      </div>
+      
+      <div class="calendar-grid" id="calendarGrid">
+        <!-- Rendered dynamically by app.js -->
+      </div>
+    </main>
+
+    <!-- Statistiche & Riepilogo Mensile -->
+    <section class="stats-card">
+      <div class="stats-card-title">Riepilogo Mese Selezionato</div>
+      <div class="stats-grid">
+        <div class="stat-box">
+          <span class="stat-value" id="statHours">0h</span>
+          <span class="stat-label">Ore Lavorate</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-value" id="statRiposi" style="color: var(--riposo-badge);">0</span>
+          <span class="stat-label">Giorni Riposo</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-value" id="statAperture" style="color: var(--speciale-badge);">0</span>
+          <span class="stat-label">Aperture</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-value" id="statChiusure" style="color: #ef4444;">0</span>
+          <span class="stat-label">Chiusure</span>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+
+  <!-- =========================================================================
+       3. MODALE DETTAGLIO GIORNO (BOTTOM SHEET)
+       ========================================================================= -->
+  <div id="dayDetailModal" class="modal-backdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-drag-handle"></div>
+      
+      <div class="sheet-header">
+        <h2 class="sheet-title" id="modalDayDate">Dettaglio Turno</h2>
+        <button type="button" class="close-btn" id="btnCloseDayModal">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      
+      <div id="modalDayBody">
+        <!-- Inserito dinamicamente -->
+      </div>
+    </div>
+  </div>
+
+
+  <!-- =========================================================================
+       4. MODALE IMPOSTAZIONI
+       ========================================================================= -->
+  <div id="settingsModal" class="modal-backdrop">
+    <div class="bottom-sheet">
+      <div class="sheet-drag-handle"></div>
+      
+      <div class="sheet-header">
+        <h2 class="sheet-title">Impostazioni</h2>
+        <button type="button" class="close-btn" id="btnCloseSettings">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+      
+      <div class="settings-list">
+        <!-- Tema Chiaro / Scuro -->
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Tema Grafico</span>
+            <span class="setting-desc">Scegli tra modalità chiara o scura</span>
+          </div>
+          <div class="theme-toggle-group">
+            <button type="button" class="theme-btn" id="themeLightBtn" data-theme="light">Chiaro</button>
+            <button type="button" class="theme-btn" id="themeDarkBtn" data-theme="dark">Scuro</button>
+          </div>
+        </div>
+        
+        <!-- Versione Software -->
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Versione Software</span>
+            <span class="setting-desc">Rilasci e aggiornamenti dell'applicazione</span>
+          </div>
+          <span class="detail-item-val" style="color: var(--brand-primary);">v1.0.0</span>
+        </div>
+        
+        <!-- Stato Firebase Cloud -->
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Cloud Firebase</span>
+            <span class="setting-desc" id="firebaseStatusText">Sincronizzazione attiva & cifrata</span>
+          </div>
+          <span class="status-pill" id="firebaseStatusBadge" style="background: var(--riposo-bg); color: var(--riposo-text);">Online</span>
+        </div>
+        
+        <!-- Blocco Applicazione -->
+        <div class="setting-row" style="margin-top: 10px; border-bottom: none;">
+          <div class="setting-info">
+            <span class="setting-name">Sicurezza Dispositivo</span>
+            <span class="setting-desc">Blocca l'app con la password</span>
+          </div>
+          <button type="button" class="icon-btn" id="btnLockApp" style="width: auto; padding: 6px 14px; border-radius: var(--radius-sm); font-weight: 600; font-size: 0.82rem; gap: 6px;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <span>Blocca</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+  <!-- Toast Notifications Container -->
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- Main Application Script -->
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

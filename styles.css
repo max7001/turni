@@ -1,6 +1,6 @@
 /* ==========================================================================
    Gestione Orari - Mobile First CSS Stylesheet
-   Version 1.2.0
+   Version 1.4.0
    ========================================================================== */
 
 :root {
@@ -516,8 +516,8 @@ body {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 5px;
   text-align: center;
 }
 
@@ -525,23 +525,29 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   background: var(--bg-subtle);
   border-radius: var(--radius-sm);
-  padding: 8px 4px;
+  padding: 6px 2px;
+  min-width: 0;
 }
 
 .stat-value {
-  font-size: 1.15rem;
+  font-size: 1.02rem;
   font-weight: 800;
   line-height: 1.1;
   color: var(--text-primary);
 }
 
 .stat-label {
-  font-size: 0.65rem;
-  font-weight: 600;
+  font-size: 0.58rem;
+  font-weight: 700;
   color: var(--text-secondary);
-  margin-top: 2px;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 /* Modals & Drawers */
@@ -1163,4 +1169,177 @@ body {
   font-size: 0.72rem;
   color: var(--text-secondary);
   font-weight: 600;
+}
+
+/* ==========================================================================
+   VARIAZIONI & CAMBI TURNO MANUALI (Version 1.3.0)
+   ========================================================================== */
+
+/* Badge Cambio Turno (Simbolino del cambio nella casella del calendario) */
+.day-badge-tag.tag-cambio {
+  background: linear-gradient(135deg, #7c3aed, #6366f1);
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  box-shadow: 0 1px 2px rgba(124, 58, 237, 0.3);
+}
+
+.day-cell.is-cambiato {
+  outline: 1.5px dashed #8b5cf6;
+  outline-offset: -1px;
+}
+
+/* Edit Shift Section in Day Detail Modal */
+.edit-shift-section {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 14px;
+}
+
+.edit-shift-toggle-btn {
+  width: 100%;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  color: var(--brand-primary);
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.edit-shift-toggle-btn:active {
+  transform: scale(0.98);
+}
+
+.edit-shift-panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: var(--shadow-sm);
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-label {
+  font-size: 0.76rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.form-row-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.form-input:focus {
+  border-color: var(--brand-primary);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.checkbox-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cambio-diff-pill {
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+}
+
+.cambio-diff-pill.diff-plus {
+  background: var(--riposo-bg);
+  color: var(--riposo-text);
+}
+
+.cambio-diff-pill.diff-minus {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+[data-theme="dark"] .cambio-diff-pill.diff-minus {
+  background: rgba(153, 27, 27, 0.35);
+  color: #fca5a5;
+}
+
+/* Cambi list in Stats */
+.cambi-list-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.cambio-card {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cambio-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cambio-card-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.cambio-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.76rem;
+  color: var(--text-secondary);
 }

@@ -365,6 +365,23 @@ async function processExcelFile(file) {
       throw new Error("Nessuna riga trovata per 'Giusy de Santis' nel foglio 'Inserimento Orari'.");
     }
     
+    // Funzione interna per controllare se un giorno è compilato per almeno un dipendente
+    function isDayCompiledForStore(dDef, startRow, endRow) {
+      const cols = [dDef.inM, dDef.outM, dDef.inP, dDef.outP, dDef.tot];
+      for (let r = startRow; r <= endRow; r++) {
+        for (let i = 0; i < cols.length; i++) {
+          const cell = worksheet[`${cols[i]}${r}`];
+          if (cell && cell.v !== undefined && cell.v !== null && cell.v !== "") {
+            const val = typeof cell.v === "number" ? cell.v : parseFloat(String(cell.v).replace(",", "."));
+            if (!isNaN(val) && val > 0 && val <= 24) {
+              return true; // Almeno una persona nel negozio ha orario compilato in questo giorno
+            }
+          }
+        }
+      }
+      return false; // Nessuna persona del negozio ha orario compilato in questo giorno
+    }
+
     const parsedShifts = {};
     const validDates = [];
     
@@ -380,7 +397,11 @@ async function processExcelFile(file) {
         saturdayDate = parseExcelSerialDate(cellSat.v);
       }
       
-      // Per ciascuno dei 7 giorni della settimana
+      // Righe del personale per questa settimana
+      const staffStart = wRow + 4;
+      const staffEnd = Math.min(wRow + 85, range.e.r + 1);
+
+      // Per ciascuno dei 7 giorni della settimana (inclusi giorni del mese successivo)
       DAY_SCHEMAS.forEach(dDef => {
         let dayDate = null;
         const cellDate = worksheet[`${dDef.dateCol}${wRow}`];
@@ -395,6 +416,11 @@ async function processExcelFile(file) {
         }
         
         if (!dayDate) return;
+
+        // NON importare giorni se non sono stati compilati orari di nessuna persona nel negozio
+        if (!isDayCompiledForStore(dDef, staffStart, staffEnd)) {
+          return;
+        }
         
         // Estrazione orari per Giusy in questo giorno
         const rawInM = worksheet[`${dDef.inM}${gRow}`]?.v;
@@ -443,6 +469,7 @@ async function processExcelFile(file) {
           startTime,
           endTime,
           totalHours: isRiposo ? 0 : totalHoursNum,
+          overtimeHours: (hasWork && totalHoursNum > 5) ? Math.round((totalHoursNum - 5) * 10) / 10 : 0,
           displayHours: hasWork ? (
             inMorning && outMorning && inAfternoon && outAfternoon ? 
               `${inMorning}-${outMorning} / ${inAfternoon}-${outAfternoon}` : 
@@ -469,7 +496,7 @@ async function processExcelFile(file) {
 let pendingImport = null;
 
 /**
- * Gestisce l'aggiunta dei turni o la richiesta di sostituzione se il mese è già presente
+ * Gestisce l'aggiunta dei turni, il controllo mesi doppi e la protezione esplicita dei turni variati
  */
 function handleIncomingShifts(incomingShifts, fileName, giusyRowsCount) {
   const incomingDateKeys = Object.keys(incomingShifts);
@@ -485,6 +512,9 @@ function handleIncomingShifts(incomingShifts, fileName, giusyRowsCount) {
   const existingDateKeys = Object.keys(APP_STATE.shiftsData || {});
   const existingMonthKeys = new Set(existingDateKeys.map(d => d.slice(0, 7)));
 
+  // Trova se ci sono giorni con orario variato manualmente che verrebbero sovrascritti
+  const manualOverlapDates = incomingDateKeys.filter(d => APP_STATE.shiftsData[d] && APP_STATE.shiftsData[d].isManualChange);
+
   // Trova i mesi in conflitto che hanno già almeno 3 turni registrati
   const conflictingMonths = incomingMonthKeys.filter(m => {
     if (!existingMonthKeys.has(m)) return false;
@@ -492,23 +522,24 @@ function handleIncomingShifts(incomingShifts, fileName, giusyRowsCount) {
     return countInMonth >= 3;
   });
 
-  if (conflictingMonths.length > 0) {
-    // Mese già memorizzato: chiedi conferma prima di sostituire
+  if (conflictingMonths.length > 0 || manualOverlapDates.length > 0) {
+    // Richiede conferma e autorizzazione esplicita prima di sovrascrivere
     pendingImport = {
       incomingShifts,
       fileName,
       totalWeeks: giusyRowsCount,
-      conflictingMonths
+      conflictingMonths,
+      manualOverlapDates
     };
-    showConflictModal(conflictingMonths);
+    showConflictModal(conflictingMonths, manualOverlapDates);
   } else {
-    // Mese nuovo: aggiungi direttamente ai dati già memorizzati in precedenza
-    executeImportMerge(incomingShifts, [], fileName, giusyRowsCount);
+    // Mese nuovo e nessuna variazione manuale in gioco: aggiungi direttamente
+    executeImportMerge(incomingShifts, [], fileName, giusyRowsCount, true);
     showToast("Nuovi turni aggiunti con successo a quelli già memorizzati!");
   }
 }
 
-function showConflictModal(conflictingMonths) {
+function showConflictModal(conflictingMonths, manualOverlapDates = []) {
   const monthNamesIt = [
     "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
@@ -520,8 +551,31 @@ function showConflictModal(conflictingMonths) {
   }).join(" e ");
 
   const msgEl = document.getElementById("conflictModalMsg");
-  if (msgEl) {
-    msgEl.innerHTML = `I dati caricati contengono turni per <strong>${formattedMonths}</strong>, che risultano già memorizzati in precedenza.<br><br>Vuoi <strong>sostituire i dati di ${formattedMonths}</strong> con quelli del nuovo file oppure annullare l'operazione?`;
+  const manualNotice = document.getElementById("conflictModalManualNotice");
+  const manualListEl = document.getElementById("conflictManualDatesList");
+  const btnKeep = document.getElementById("btnKeepManualAndImport");
+  const btnConfirmText = document.getElementById("btnConfirmReplaceText");
+
+  if (manualOverlapDates && manualOverlapDates.length > 0) {
+    manualNotice.style.display = "block";
+    btnKeep.style.display = "flex";
+    btnConfirmText.textContent = "Autorizza e Sovrascrivi Tutto";
+    manualListEl.innerHTML = manualOverlapDates.map(d => {
+      const s = APP_STATE.shiftsData[d];
+      const hoursDesc = s.hasWork ? `${s.startTime} - ${s.endTime} (${s.totalHours}h)` : "Riposo";
+      return `• <strong>${formatItalianDate(d)}</strong>: ${hoursDesc} (variato)`;
+    }).join("<br>");
+    
+    if (msgEl) {
+      msgEl.innerHTML = `Il file caricato contiene turni che andrebbero a sovrascrivere <strong>${manualOverlapDates.length} turno/i con orario variato manualmente</strong>.<br><br>I turni con orario variato non possono essere sovrascritti se non con la tua autorizzazione esplicita.`;
+    }
+  } else {
+    manualNotice.style.display = "none";
+    btnKeep.style.display = "none";
+    btnConfirmText.textContent = "Sostituisci Dati Mese";
+    if (msgEl) {
+      msgEl.innerHTML = `I dati caricati contengono turni per <strong>${formattedMonths}</strong>, che risultano già memorizzati in precedenza.<br><br>Vuoi <strong>sostituire i dati di ${formattedMonths}</strong> con quelli del nuovo file oppure annullare l'operazione?`;
+    }
   }
 
   document.getElementById("conflictModal").classList.add("active");
@@ -534,24 +588,34 @@ function closeConflictModal() {
 
 /**
  * Esegue l'unione dei nuovi turni con quelli preesistenti
- * Se specificato replaceMonths, rimuove solo i turni di quei mesi prima di aggiungere i nuovi
+ * Se preserveManualChanges è true, non sovrascrive mai i giorni con modifiche manuali
  */
-function executeImportMerge(incomingShifts, replaceMonths = [], fileName = "import.xlsx", totalWeeks = 0) {
+function executeImportMerge(incomingShifts, replaceMonths = [], fileName = "import.xlsx", totalWeeks = 0, preserveManualChanges = true) {
   // Inizia con una copia dei dati già memorizzati in precedenza
   const merged = { ...APP_STATE.shiftsData };
 
-  // Se è richiesta la sostituzione di determinati mesi, cancella solo le date di quei mesi
+  // Se è richiesta la sostituzione di determinati mesi, cancella solo le date di quei mesi (preservando i cambi manuali se richiesto)
   if (replaceMonths.length > 0) {
     const replaceSet = new Set(replaceMonths);
     Object.keys(merged).forEach(dateKey => {
       if (replaceSet.has(dateKey.slice(0, 7))) {
-        delete merged[dateKey];
+        if (preserveManualChanges && merged[dateKey] && merged[dateKey].isManualChange) {
+          // Proteggi la variazione manuale!
+        } else {
+          delete merged[dateKey];
+        }
       }
     });
   }
 
   // Aggiungi tutti i turni del file caricato
-  Object.assign(merged, incomingShifts);
+  Object.keys(incomingShifts).forEach(dateKey => {
+    if (preserveManualChanges && merged[dateKey] && merged[dateKey].isManualChange) {
+      // Protezione: non sovrascrivere il giorno modificato manualmente senza autorizzazione esplicita
+    } else {
+      merged[dateKey] = incomingShifts[dateKey];
+    }
+  });
 
   // Ricalcola il periodo complessivo (Data Inizio e Data Fine su tutti i turni lavorati)
   const allWorkingDates = Object.values(merged)
@@ -690,13 +754,19 @@ function renderCalendar() {
     if (dateKey === todayKey) cell.classList.add("today");
     
     if (shift) {
+      if (shift.isManualChange) {
+        cell.classList.add("is-cambiato");
+      }
+
+      const cambioBadge = shift.isManualChange ? `<span class="day-badge-tag tag-cambio" title="Orario variato manualmente">⇄</span>` : "";
+
       if (shift.isRiposo) {
         // EVIDENZIA IN VERDE I GIORNI DI RIPOSO
         cell.classList.add("is-riposo");
         cell.innerHTML = `
           <div class="day-top-row">
             <span class="day-number">${d}</span>
-            <span class="day-badge-tag tag-riposo">Riposo</span>
+            ${cambioBadge}
           </div>
           <div class="day-info">
             <span class="day-time-text" style="color: var(--riposo-text);">Riposo</span>
@@ -718,7 +788,10 @@ function renderCalendar() {
         cell.innerHTML = `
           <div class="day-top-row">
             <span class="day-number">${d}</span>
-            <span class="hours-pill">${shift.totalHours}h</span>
+            <div style="display: flex; align-items: center; gap: 3px;">
+              ${cambioBadge}
+              <span class="hours-pill">${shift.totalHours}h</span>
+            </div>
           </div>
           <div class="day-info">
             <div style="display: flex; gap: 2px; flex-wrap: wrap;">${tagHtml}</div>
@@ -731,7 +804,10 @@ function renderCalendar() {
         cell.innerHTML = `
           <div class="day-top-row">
             <span class="day-number">${d}</span>
-            <span class="hours-pill">${shift.totalHours}h</span>
+            <div style="display: flex; align-items: center; gap: 3px;">
+              ${cambioBadge}
+              <span class="hours-pill">${shift.totalHours}h</span>
+            </div>
           </div>
           <div class="day-info">
             <span class="day-time-text">${shift.startTime} - ${shift.endTime}</span>
@@ -764,6 +840,7 @@ function updateMonthlyStats() {
   let riposi = 0;
   let aperture = 0;
   let chiusure = 0;
+  let totalOvertime = 0;
   
   Object.keys(APP_STATE.shiftsData).forEach(dateKey => {
     const [y, m] = dateKey.split("-").map(Number);
@@ -772,9 +849,14 @@ function updateMonthlyStats() {
       if (shift.isRiposo) {
         riposi++;
       } else {
-        totalHours += (shift.totalHours || 0);
+        const h = (shift.totalHours || 0);
+        totalHours += h;
         if (shift.isApertura) aperture++;
         if (shift.isChiusura) chiusure++;
+
+        // Calcolo ore di straordinario (oltre le 5 ore contrattuali)
+        const ot = shift.overtimeHours !== undefined ? shift.overtimeHours : (h > 5 ? Math.round((h - 5) * 10) / 10 : 0);
+        totalOvertime += ot;
       }
     }
   });
@@ -783,6 +865,8 @@ function updateMonthlyStats() {
   document.getElementById("statRiposi").textContent = riposi;
   document.getElementById("statAperture").textContent = aperture;
   document.getElementById("statChiusure").textContent = chiusure;
+  const otEl = document.getElementById("statOvertime");
+  if (otEl) otEl.textContent = `${Math.round(totalOvertime * 10) / 10}h`;
 }
 
 // =============================================================================
@@ -809,8 +893,31 @@ function openDayDetailModal(dateObj, shift) {
     badgeType = `<span class="status-pill" style="font-size: 0.8rem; padding: 4px 8px;">Turno Regolare</span>`;
   }
   
+  let manualNoticeHtml = "";
+  if (shift.isManualChange) {
+    manualNoticeHtml = `
+      <div style="background: rgba(139, 92, 246, 0.12); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 14px;">
+        <div style="font-weight: 700; color: #8b5cf6; display: flex; align-items: center; gap: 6px; font-size: 0.84rem;">
+          <span class="day-badge-tag tag-cambio" style="padding: 2px 6px; font-size: 0.72rem;">⇄ Cambio</span>
+          <span>Orario Variato Manualmente</span>
+        </div>
+        <div style="font-size: 0.76rem; color: var(--text-secondary); margin-top: 5px; line-height: 1.4;">
+          Orario originale file Excel: <strong>${shift.originalStartTime && shift.originalEndTime ? `${shift.originalStartTime} — ${shift.originalEndTime}` : 'Riposo'} (${shift.originalTotalHours !== undefined ? shift.originalTotalHours : 0} ore)</strong>
+          ${shift.changeNote ? `<br>Motivo: <em>${shift.changeNote}</em>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  const effectiveOvertime = shift.overtimeHours !== undefined ? 
+    shift.overtimeHours : 
+    (shift.totalHours > 5 ? Math.round((shift.totalHours - 5) * 10) / 10 : 0);
+  const hasOvertime = (shift.hasWork && (shift.totalHours > 5 || effectiveOvertime > 0));
+
   body.innerHTML = `
-    <div style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
+    ${manualNoticeHtml}
+
+    <div style="margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
       <span style="font-size: 0.9rem; color: var(--text-secondary);">Tipologia:</span>
       <div>${badgeType}</div>
     </div>
@@ -827,16 +934,257 @@ function openDayDetailModal(dateObj, shift) {
     
     <div class="detail-item-card">
       <span class="detail-item-title">Inizio & Fine Effettivi</span>
-      <span class="detail-item-val" style="color: var(--brand-primary);">${shift.hasWork ? `${shift.startTime}  —  ${shift.endTime}` : "Nessun turno"}</span>
+      <span class="detail-item-val" style="color: var(--brand-primary); font-weight: 700;">${shift.hasWork ? `${shift.startTime}  —  ${shift.endTime}` : "Nessun turno (Riposo)"}</span>
     </div>
     
-    <div class="detail-item-card" style="background: var(--bg-surface); border: 1px solid var(--border-color);">
-      <span class="detail-item-title" style="font-weight: 700;">Totale Ore Lavorate</span>
-      <span class="detail-item-val" style="font-size: 1.1rem; color: var(--text-primary);">${shift.totalHours} ore</span>
+    <!-- Totale Ore Lavorate e Card Straordinario (se > 5 ore) -->
+    <div style="display: grid; grid-template-columns: ${hasOvertime ? '1fr 1fr' : '1fr'}; gap: 10px; margin-bottom: 12px;">
+      <div class="detail-item-card" style="margin-bottom: 0; background: var(--bg-surface); border: 1px solid var(--border-color);">
+        <span class="detail-item-title" style="font-weight: 700;">Totale Ore Lavorate</span>
+        <span class="detail-item-val" style="font-size: 1.1rem; color: var(--text-primary); font-weight: 800;">${shift.totalHours} ore</span>
+      </div>
+
+      ${hasOvertime ? `
+        <div class="detail-item-card" style="margin-bottom: 0; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); flex-direction: column; align-items: flex-start;">
+          <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <span class="detail-item-title" style="color: #b45309; font-weight: 700;">Ore Straordinario</span>
+            <button type="button" id="btnEditOvertime" style="background: none; border: none; color: #b45309; cursor: pointer; padding: 2px; display: flex; align-items: center;" title="Modifica ore straordinario">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path></svg>
+            </button>
+          </div>
+          <div id="overtimeDisplayRow" style="display: flex; align-items: baseline; justify-content: space-between; width: 100%; margin-top: 3px;">
+            <span class="detail-item-val" style="font-size: 1.1rem; color: #b45309; font-weight: 800;">+${effectiveOvertime}h</span>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">(su base 5h)</span>
+          </div>
+          <div id="overtimeEditRow" style="display: none; align-items: center; gap: 6px; width: 100%; margin-top: 4px;">
+            <input type="number" id="inputOvertimeVal" step="0.5" min="0" max="15" value="${effectiveOvertime}" class="form-input" style="padding: 4px 6px; font-size: 0.85rem; height: 32px; width: 65px;">
+            <button type="button" id="btnSaveOvertime" class="icon-btn icon-btn-primary" style="height: 32px; padding: 0 8px; font-size: 0.75rem; border-radius: var(--radius-sm);">Salva</button>
+          </div>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Sezione Modifica Orario (Cambio Turno) -->
+    <div class="edit-shift-section">
+      <button type="button" class="edit-shift-toggle-btn" id="btnToggleEditShift">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"></path>
+        </svg>
+        <span>${shift.isManualChange ? "Modifica di Nuovo l'Orario" : "Modifica Orario Effettivo (Cambio Turno)"}</span>
+      </button>
+
+      <div id="editShiftPanel" class="edit-shift-panel" style="display: none;">
+        <label class="checkbox-row" id="chkRiposoRow">
+          <input type="checkbox" id="chkIsRiposo" ${shift.isRiposo ? "checked" : ""}>
+          <span class="checkbox-label">Imposta come Giorno di Riposo (0 ore)</span>
+        </label>
+
+        <div id="timeInputsContainer" class="form-row-2col" style="${shift.isRiposo ? "display: none;" : ""}">
+          <div class="form-group">
+            <label class="form-label" for="inputStartTime">Inizio Effettivo</label>
+            <input type="time" id="inputStartTime" class="form-input" value="${shift.startTime || '09:00'}">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="inputEndTime">Fine Effettiva</label>
+            <input type="time" id="inputEndTime" class="form-input" value="${shift.endTime || '14:00'}">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="inputChangeNote">Motivo / Nota Cambio (Opzionale)</label>
+          <input type="text" id="inputChangeNote" class="form-input" placeholder="es. Cambio turno collega, straordinario..." value="${shift.changeNote || ''}">
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-top: 4px;">
+          <button type="button" id="btnSaveShiftChange" class="icon-btn icon-btn-primary" style="flex: 1; height: 42px; font-weight: 700; font-size: 0.88rem; border-radius: var(--radius-sm);">
+            Salva Variazione
+          </button>
+          ${shift.isManualChange ? `
+            <button type="button" id="btnRevertShiftChange" class="icon-btn" style="height: 42px; font-weight: 600; font-size: 0.82rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color); color: #ef4444;" title="Ripristina orario originale da Excel">
+              Ripristina
+            </button>
+          ` : ''}
+        </div>
+      </div>
     </div>
   `;
+
+  // Listener per card straordinario
+  if (hasOvertime) {
+    const btnEditOt = document.getElementById("btnEditOvertime");
+    const otDisplay = document.getElementById("overtimeDisplayRow");
+    const otEdit = document.getElementById("overtimeEditRow");
+    const inputOt = document.getElementById("inputOvertimeVal");
+    const btnSaveOt = document.getElementById("btnSaveOvertime");
+
+    if (btnEditOt) {
+      btnEditOt.addEventListener("click", () => {
+        const isEditing = otEdit.style.display === "flex";
+        otEdit.style.display = isEditing ? "none" : "flex";
+        otDisplay.style.display = isEditing ? "flex" : "none";
+        if (!isEditing && inputOt) inputOt.focus();
+      });
+    }
+
+    if (btnSaveOt) {
+      btnSaveOt.addEventListener("click", () => {
+        const val = parseFloat(inputOt.value);
+        const newOt = !isNaN(val) && val >= 0 ? val : 0;
+        shift.overtimeHours = newOt;
+        shift.hasCustomOvertime = true;
+        persistShiftsData();
+        updateMonthlyStats();
+        renderStatistics();
+        openDayDetailModal(dateObj, shift);
+        showToast(`Ore di straordinario impostate a ${newOt}h`);
+      });
+    }
+  }
+
+  // Listener per pannello modifica orario
+  const btnToggle = document.getElementById("btnToggleEditShift");
+  const panel = document.getElementById("editShiftPanel");
+  const chkRiposo = document.getElementById("chkIsRiposo");
+  const timeContainer = document.getElementById("timeInputsContainer");
+  const inStart = document.getElementById("inputStartTime");
+  const inEnd = document.getElementById("inputEndTime");
+  const inNote = document.getElementById("inputChangeNote");
+  const btnSave = document.getElementById("btnSaveShiftChange");
+  const btnRevert = document.getElementById("btnRevertShiftChange");
+
+  btnToggle.addEventListener("click", () => {
+    panel.style.display = panel.style.display === "none" ? "flex" : "none";
+  });
+
+  chkRiposo.addEventListener("change", () => {
+    timeContainer.style.display = chkRiposo.checked ? "none" : "grid";
+  });
+
+  btnSave.addEventListener("click", () => {
+    saveShiftManualChange(shift, {
+      isRiposo: chkRiposo.checked,
+      startTime: inStart.value,
+      endTime: inEnd.value,
+      note: inNote.value.trim()
+    });
+    modal.classList.remove("active");
+  });
+
+  if (btnRevert) {
+    btnRevert.addEventListener("click", () => {
+      revertShiftManualChange(shift);
+      modal.classList.remove("active");
+    });
+  }
   
   modal.classList.add("active");
+}
+
+function calculateShiftHours(t1, t2) {
+  if (!t1 || !t2) return 0;
+  const [h1, m1] = t1.split(":").map(Number);
+  const [h2, m2] = t2.split(":").map(Number);
+  let diff = (h2 * 60 + m2) - (h1 * 60 + m1);
+  if (diff < 0) diff += 24 * 60;
+  return Math.round((diff / 60) * 10) / 10;
+}
+
+function saveShiftManualChange(shift, changes) {
+  // Salva i valori originali prima della prima variazione manuale
+  if (shift.originalStartTime === undefined) {
+    shift.originalStartTime = shift.startTime;
+    shift.originalEndTime = shift.endTime;
+    shift.originalTotalHours = shift.totalHours;
+    shift.originalIsRiposo = shift.isRiposo;
+    shift.originalIsApertura = shift.isApertura;
+    shift.originalIsChiusura = shift.isChiusura;
+  }
+
+  if (changes.isRiposo) {
+    shift.isRiposo = true;
+    shift.hasWork = false;
+    shift.startTime = null;
+    shift.endTime = null;
+    shift.totalHours = 0;
+    shift.overtimeHours = 0;
+    shift.isApertura = false;
+    shift.isChiusura = false;
+    shift.displayHours = "Riposo";
+  } else {
+    shift.isRiposo = false;
+    shift.hasWork = true;
+    shift.startTime = changes.startTime;
+    shift.endTime = changes.endTime;
+    shift.totalHours = calculateShiftHours(changes.startTime, changes.endTime);
+    shift.overtimeHours = shift.totalHours > 5 ? Math.round((shift.totalHours - 5) * 10) / 10 : 0;
+    
+    // Calcolo apertura e chiusura in base ai nuovi orari
+    const [startH, startM] = changes.startTime.split(":").map(Number);
+    const [endH, endM] = changes.endTime.split(":").map(Number);
+    const startDec = startH + startM / 60;
+    const endDec = endH + endM / 60;
+    
+    shift.isApertura = startDec <= 9.5;
+    shift.isChiusura = endDec >= 21.0;
+    shift.displayHours = `${shift.startTime} - ${shift.endTime}`;
+  }
+
+  shift.isManualChange = true;
+  shift.changeNote = changes.note || "Orario variato manualmente";
+  shift.changeTimestamp = new Date().toISOString();
+
+  persistShiftsData();
+  renderCalendar();
+  updateMonthlyStats();
+  renderStatistics();
+  showToast("Orario del giorno variato con successo!");
+}
+
+function revertShiftManualChange(shift) {
+  if (shift.originalStartTime !== undefined) {
+    shift.startTime = shift.originalStartTime;
+    shift.endTime = shift.originalEndTime;
+    shift.totalHours = shift.originalTotalHours;
+    shift.isRiposo = shift.originalIsRiposo;
+    shift.isApertura = shift.originalIsApertura;
+    shift.isChiusura = shift.originalIsChiusura;
+    shift.overtimeHours = shift.totalHours > 5 ? Math.round((shift.totalHours - 5) * 10) / 10 : 0;
+    delete shift.hasCustomOvertime;
+    shift.hasWork = !shift.isRiposo;
+    shift.displayHours = shift.hasWork ? `${shift.startTime} - ${shift.endTime}` : "Riposo";
+  }
+  
+  delete shift.isManualChange;
+  delete shift.changeNote;
+  delete shift.changeTimestamp;
+
+  persistShiftsData();
+  renderCalendar();
+  updateMonthlyStats();
+  renderStatistics();
+  showToast("Orario originale da file Excel ripristinato!");
+}
+
+function persistShiftsData() {
+  const allWorkingDates = Object.values(APP_STATE.shiftsData)
+    .filter(s => s.hasWork && s.date)
+    .map(s => s.date)
+    .sort();
+
+  const periodStart = allWorkingDates.length > 0 ? allWorkingDates[0] : null;
+  const periodEnd = allWorkingDates.length > 0 ? allWorkingDates[allWorkingDates.length - 1] : null;
+
+  const payload = {
+    person: "Giusy de Santis",
+    lastUpdate: new Date().toISOString(),
+    periodStart,
+    periodEnd,
+    totalShifts: Object.keys(APP_STATE.shiftsData).length,
+    shiftsData: APP_STATE.shiftsData
+  };
+
+  localStorage.setItem("giusy_shifts_payload", JSON.stringify(payload));
+  syncToFirebase(payload);
 }
 
 document.getElementById("btnCloseDayModal").addEventListener("click", () => {
@@ -932,6 +1280,7 @@ function computeStatistics() {
   let closingsCount = 0;
   let regularCount = 0;
   let weekendShiftsCount = 0;
+  let totalOvertime = 0;
   
   const daysMap = {
     "Lunedì":    { name: "Lunedì", short: "Lun", count: 0, hours: 0, isWeekend: false },
@@ -955,6 +1304,10 @@ function computeStatistics() {
     } else {
       workDaysCount++;
       totalHours += h;
+      
+      const ot = s.overtimeHours !== undefined ? s.overtimeHours : (h > 5 ? Math.round((h - 5) * 10) / 10 : 0);
+      totalOvertime += ot;
+
       if (s.isApertura) openingsCount++;
       if (s.isChiusura) closingsCount++;
       if (!isSpecial) regularCount++;
@@ -979,6 +1332,7 @@ function computeStatistics() {
         label: wKey,
         shortLabel: wKey.replace("Settimana ", "S."),
         totalHours: 0,
+        overtimeHours: 0,
         workDays: 0,
         restDays: 0,
         openings: 0,
@@ -992,6 +1346,8 @@ function computeStatistics() {
     } else {
       weeksMap[wKey].workDays++;
       weeksMap[wKey].totalHours += h;
+      const ot = s.overtimeHours !== undefined ? s.overtimeHours : (h > 5 ? Math.round((h - 5) * 10) / 10 : 0);
+      weeksMap[wKey].overtimeHours += ot;
       if (s.isApertura) weeksMap[wKey].openings++;
       if (s.isChiusura) weeksMap[wKey].closings++;
     }
@@ -1004,14 +1360,20 @@ function computeStatistics() {
   // Ordina turni speciali per data
   specialShifts.sort((a, b) => a.date.localeCompare(b.date));
 
+  // Turni con variazioni manuali (cambi)
+  const manualChanges = shifts.filter(s => s.isManualChange);
+
   return {
     totalHours,
+    totalOvertime: Math.round(totalOvertime * 10) / 10,
     workDaysCount,
     restDaysCount,
     openingsCount,
     closingsCount,
     regularCount,
     weekendShiftsCount,
+    manualChangesCount: manualChanges.length,
+    manualChanges,
     avgWeeklyHours,
     totalDays: shifts.length,
     weeksList,
@@ -1042,6 +1404,10 @@ function renderStatistics() {
   document.getElementById("kpiOpenings").textContent = stats.openingsCount;
   document.getElementById("kpiClosings").textContent = stats.closingsCount;
   document.getElementById("kpiWeekendShifts").textContent = stats.weekendShiftsCount;
+  const kpiCambi = document.getElementById("kpiManualChanges");
+  if (kpiCambi) kpiCambi.textContent = stats.manualChangesCount;
+  const kpiOt = document.getElementById("kpiTotalOvertime");
+  if (kpiOt) kpiOt.textContent = `${stats.totalOvertime}h`;
 
   // 2. Grafico Distribuzione Turni (Progress bar)
   const totalDays = Math.max(1, stats.totalDays);
@@ -1073,6 +1439,9 @@ function renderStatistics() {
 
   // 6. Elenco Aperture & Chiusure
   renderSpecialShiftsList(stats.specialShifts);
+
+  // 7. Sezione Cambi Turno (Modifiche Manuali)
+  renderManualChangesList(stats.manualChanges);
 }
 
 function renderWeeklyHoursChartSvg(weeks) {
@@ -1189,15 +1558,17 @@ function renderWeeklyStatsTable(weeks) {
   if (!tbody) return;
 
   if (!weeks || weeks.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 16px;">Nessuna settimana presente</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 16px;">Nessuna settimana presente</td></tr>`;
     return;
   }
 
   tbody.innerHTML = weeks.map(w => {
+    const ot = Math.round(w.overtimeHours * 10) / 10;
     return `
       <tr>
         <td style="font-weight: 700; color: var(--brand-primary);">${w.label}</td>
         <td><span class="hours-pill" style="font-size: 0.75rem;">${w.totalHours}h</span></td>
+        <td><span style="color: #b45309; font-weight: 700;">${ot > 0 ? `+${ot}h` : '0h'}</span></td>
         <td>${w.workDays} gg</td>
         <td><span style="color: var(--riposo-badge); font-weight: 700;">${w.restDays}</span></td>
         <td><span style="color: var(--speciale-badge); font-weight: 700;">${w.openings}</span></td>
@@ -1238,6 +1609,75 @@ function renderSpecialShiftsList(shifts) {
   }).join("");
 }
 
+function renderManualChangesList(manualChanges) {
+  const container = document.getElementById("manualChangesList");
+  if (!container) return;
+
+  if (!manualChanges || manualChanges.length === 0) {
+    container.innerHTML = `
+      <div style="text-align: center; color: var(--text-muted); padding: 18px; font-size: 0.85rem;">
+        Nessun turno variato manualmente nel periodo selezionato.
+      </div>
+    `;
+    return;
+  }
+
+  // Ordina cronologicamente
+  const sorted = [...manualChanges].sort((a, b) => a.date.localeCompare(b.date));
+
+  container.innerHTML = sorted.map(s => {
+    const origHours = s.originalTotalHours !== undefined ? s.originalTotalHours : 0;
+    const newHours = s.totalHours || 0;
+    const diff = Math.round((newHours - origHours) * 10) / 10;
+    
+    let diffBadge = "";
+    if (diff > 0) {
+      diffBadge = `<span class="cambio-diff-pill diff-plus">+${diff}h</span>`;
+    } else if (diff < 0) {
+      diffBadge = `<span class="cambio-diff-pill diff-minus">${diff}h</span>`;
+    } else {
+      diffBadge = `<span class="cambio-diff-pill" style="background: var(--bg-surface); color: var(--text-secondary);">= 0h</span>`;
+    }
+
+    const origDesc = (s.originalStartTime && s.originalEndTime) ? 
+      `${s.originalStartTime} — ${s.originalEndTime} (${origHours}h)` : 
+      (s.originalIsRiposo ? "Riposo (0h)" : `${origHours}h`);
+
+    const newDesc = (s.startTime && s.endTime) ? 
+      `${s.startTime} — ${s.endTime} (${newHours}h)` : 
+      "Riposo (0h)";
+
+    return `
+      <div class="cambio-card">
+        <div class="cambio-card-header">
+          <span class="cambio-card-title">${formatItalianDate(s.date)} (${s.dayName})</span>
+          <div>${diffBadge}</div>
+        </div>
+        <div class="cambio-card-body">
+          <div>
+            <div style="color: var(--text-secondary); font-size: 0.73rem;">Da Excel: <strong style="color: var(--text-primary);">${origDesc}</strong></div>
+            <div style="color: #8b5cf6; font-size: 0.77rem; font-weight: 700; margin-top: 2px;">Effettivo: ${newDesc}</div>
+          </div>
+          <button type="button" class="icon-btn btn-revert-cambio" data-date="${s.date}" style="height: 32px; padding: 4px 10px; font-size: 0.75rem; border-radius: var(--radius-sm); border: 1px solid var(--border-color); color: #ef4444;" title="Ripristina orario del file Excel">
+            Ripristina
+          </button>
+        </div>
+        ${s.changeNote ? `<div style="font-size: 0.71rem; color: var(--text-muted); font-style: italic;">Nota: ${s.changeNote}</div>` : ''}
+      </div>
+    `;
+  }).join("");
+
+  // Aggiungi listener ai pulsanti di ripristino
+  container.querySelectorAll(".btn-revert-cambio").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      const dateKey = e.currentTarget.getAttribute("data-date");
+      if (dateKey && APP_STATE.shiftsData[dateKey]) {
+        revertShiftManualChange(APP_STATE.shiftsData[dateKey]);
+      }
+    });
+  });
+}
+
 // Event Listeners per Statistiche
 document.getElementById("btnOpenStats").addEventListener("click", openStatsModal);
 document.getElementById("btnCloseStats").addEventListener("click", closeStatsModal);
@@ -1251,13 +1691,26 @@ document.getElementById("statsModal").addEventListener("click", (e) => {
 document.getElementById("btnScopeMonth").addEventListener("click", () => setStatsScope("month"));
 document.getElementById("btnScopeAll").addEventListener("click", () => setStatsScope("all"));
 
-// Event Listeners per Gestione Conflitti Mese già Memorizzato
+// Event Listeners per Gestione Conflitti Mese già Memorizzato & Protezione Cambi
+const btnKeepManual = document.getElementById("btnKeepManualAndImport");
+if (btnKeepManual) {
+  btnKeepManual.addEventListener("click", () => {
+    if (pendingImport) {
+      const { incomingShifts, conflictingMonths, fileName, totalWeeks } = pendingImport;
+      executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks, true /* preserveManualChanges */);
+      closeConflictModal();
+      showToast("Turni importati proteggendo tutte le modifiche manuali!");
+    }
+  });
+}
+
 document.getElementById("btnConfirmReplaceMonth").addEventListener("click", () => {
   if (pendingImport) {
     const { incomingShifts, conflictingMonths, fileName, totalWeeks } = pendingImport;
-    executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks);
+    // Autorizzazione esplicita a sovrascrivere tutto compresi i turni variati
+    executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks, false /* allow overwrite */);
     closeConflictModal();
-    showToast("Turni del mese sostituiti con successo!");
+    showToast("Turni sostituiti con autorizzazione esplicita!");
   }
 });
 

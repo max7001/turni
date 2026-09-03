@@ -656,6 +656,7 @@ function applyParsedData(payload, shouldSyncCloud = true) {
   }
   
   // Aggiorna la vista
+  syncCalendarToActiveMonth();
   updatePeriodBanner();
   renderCalendar();
   updateMonthlyStats();
@@ -673,6 +674,45 @@ function formatItalianDate(dateStr) {
     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
   ];
   return `${parseInt(d, 10)} ${months[parseInt(m, 10) - 1]} ${y}`;
+}
+
+/**
+ * Dal primo giorno del mese successivo (o mese in corso),
+ * mostra automaticamente tutto il mese in corso nel calendario.
+ */
+function syncCalendarToActiveMonth() {
+  const now = new Date();
+  const currentRealMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const nowKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const allDates = Object.keys(APP_STATE.shiftsData || {});
+
+  if (allDates.length === 0) {
+    APP_STATE.currentDate = currentRealMonth;
+    return;
+  }
+
+  // Se ci sono turni per il mese solare reale in corso (dal 1° giorno del mese in poi), mostralo
+  const hasShiftsInRealMonth = allDates.some(d => d.startsWith(nowKey));
+  if (hasShiftsInRealMonth) {
+    APP_STATE.currentDate = currentRealMonth;
+    return;
+  }
+
+  // Se oggi ha raggiunto o superato il 1° giorno del mese successivo rispetto all'inizio dei dati:
+  const sorted = allDates.sort();
+  const earliestDate = sorted[0];
+  const [earliestY, earliestM] = earliestDate.split("-").map(Number);
+  const earliestMonthStart = new Date(earliestY, earliestM - 1, 1);
+
+  if (now >= earliestMonthStart) {
+    // Mostra il mese corrente
+    APP_STATE.currentDate = currentRealMonth;
+  } else {
+    // Altrimenti imposta sul mese dei dati importati
+    const midDate = sorted[Math.floor(sorted.length / 2)];
+    const [y, m] = midDate.split("-").map(Number);
+    APP_STATE.currentDate = new Date(y, m - 1, 1);
+  }
 }
 
 function updatePeriodBanner() {
@@ -713,114 +753,122 @@ function renderCalendar() {
   // Ultimo giorno del mese
   const lastDay = new Date(year, month + 1, 0);
   
-  // Giorno della settimana del primo giorno (0 = Dom, 1 = Lun... convertiamo in Lun = 0, Dom = 6)
-  let startDayOfWeek = firstDay.getDay() - 1;
-  if (startDayOfWeek === -1) startDayOfWeek = 6; // Domenica
-  
-  // Giorni del mese precedente per riempire la prima settimana
-  const prevMonthLastDay = new Date(year, month, 0).getDate();
+  // 1. Settimana iniziale completa: giorni del mese precedente prima del 1° del mese (Lun=0...Dom=6)
+  let startDayOfWeek = (firstDay.getDay() + 6) % 7;
   for (let i = startDayOfWeek - 1; i >= 0; i--) {
-    const d = prevMonthLastDay - i;
-    const cell = document.createElement("div");
-    cell.className = "day-cell other-month";
+    const prevDate = new Date(year, month, -i);
+    const dateKey = formatDateKey(prevDate);
+    const shift = APP_STATE.shiftsData[dateKey];
+    grid.appendChild(createDayCell(prevDate, shift, true));
+  }
+  
+  // 2. Giorni del mese corrente
+  for (let d = 1; d <= lastDay.getDate(); d++) {
+    const thisDate = new Date(year, month, d);
+    const dateKey = formatDateKey(thisDate);
+    const shift = APP_STATE.shiftsData[dateKey];
+    grid.appendChild(createDayCell(thisDate, shift, false));
+  }
+
+  // 3. Settimana finale completa: giorni del mese successivo fino a Domenica (Lun=0...Dom=6)
+  let endDayOfWeek = (lastDay.getDay() + 6) % 7;
+  const nextDaysNeeded = (6 - endDayOfWeek);
+  for (let n = 1; n <= nextDaysNeeded; n++) {
+    const nextDate = new Date(year, month + 1, n);
+    const dateKey = formatDateKey(nextDate);
+    const shift = APP_STATE.shiftsData[dateKey];
+    grid.appendChild(createDayCell(nextDate, shift, true));
+  }
+}
+
+function createDayCell(dateObj, shift, isOtherMonth = false) {
+  const d = dateObj.getDate();
+  const dateKey = formatDateKey(dateObj);
+  const todayKey = formatDateKey(new Date());
+
+  const cell = document.createElement("div");
+  cell.className = "day-cell";
+  if (isOtherMonth) {
+    cell.classList.add("other-month");
+  }
+  if (dateKey === todayKey) {
+    cell.classList.add("today");
+  }
+
+  if (shift) {
+    if (shift.isManualChange) {
+      cell.classList.add("is-cambiato");
+    }
+
+    const cambioBadge = shift.isManualChange ? `<span class="day-badge-tag tag-cambio" title="Orario variato manualmente">⇄</span>` : "";
+
+    if (shift.isRiposo) {
+      // EVIDENZIA IN VERDE I GIORNI DI RIPOSO
+      cell.classList.add("is-riposo");
+      cell.innerHTML = `
+        <div class="day-top-row">
+          <span class="day-number">${d}</span>
+          ${cambioBadge}
+        </div>
+        <div class="day-info">
+          <span class="day-time-text" style="color: var(--riposo-text);">Riposo</span>
+        </div>
+      `;
+    } else if (shift.isApertura || shift.isChiusura) {
+      // EVIDENZIA IN GIALLO I GIORNI DI APERTURA O CHIUSURA
+      cell.classList.add("is-speciale");
+      
+      let tagHtml = "";
+      if (shift.isApertura && shift.isChiusura) {
+        tagHtml = `<span class="day-badge-tag tag-apertura">Aper</span><span class="day-badge-tag tag-chiusura">Chiu</span>`;
+      } else if (shift.isApertura) {
+        tagHtml = `<span class="day-badge-tag tag-apertura">Apertura</span>`;
+      } else {
+        tagHtml = `<span class="day-badge-tag tag-chiusura">Chiusura</span>`;
+      }
+      
+      cell.innerHTML = `
+        <div class="day-top-row">
+          <span class="day-number">${d}</span>
+          <div style="display: flex; align-items: center; gap: 3px;">
+            ${cambioBadge}
+            <span class="hours-pill">${shift.totalHours}h</span>
+          </div>
+        </div>
+        <div class="day-info">
+          <div style="display: flex; gap: 2px; flex-wrap: wrap;">${tagHtml}</div>
+          <span class="day-time-text">${shift.startTime} - ${shift.endTime}</span>
+        </div>
+      `;
+    } else {
+      // TURNO REGOLARE STANDARD
+      cell.classList.add("is-normale");
+      cell.innerHTML = `
+        <div class="day-top-row">
+          <span class="day-number">${d}</span>
+          <div style="display: flex; align-items: center; gap: 3px;">
+            ${cambioBadge}
+            <span class="hours-pill">${shift.totalHours}h</span>
+          </div>
+        </div>
+        <div class="day-info">
+          <span class="day-time-text">${shift.startTime} - ${shift.endTime}</span>
+        </div>
+      `;
+    }
+
+    cell.addEventListener("click", () => {
+      openDayDetailModal(dateObj, shift);
+    });
+  } else {
     cell.innerHTML = `
       <div class="day-top-row">
         <span class="day-number">${d}</span>
       </div>
     `;
-    grid.appendChild(cell);
   }
-  
-  // Giorni del mese corrente
-  const today = new Date();
-  const todayKey = formatDateKey(today);
-  
-  for (let d = 1; d <= lastDay.getDate(); d++) {
-    const thisDate = new Date(year, month, d);
-    const dateKey = formatDateKey(thisDate);
-    const shift = APP_STATE.shiftsData[dateKey];
-    
-    const cell = document.createElement("div");
-    cell.className = "day-cell";
-    if (dateKey === todayKey) cell.classList.add("today");
-    
-    if (shift) {
-      if (shift.isManualChange) {
-        cell.classList.add("is-cambiato");
-      }
 
-      const cambioBadge = shift.isManualChange ? `<span class="day-badge-tag tag-cambio" title="Orario variato manualmente">⇄</span>` : "";
-
-      if (shift.isRiposo) {
-        // EVIDENZIA IN VERDE I GIORNI DI RIPOSO
-        cell.classList.add("is-riposo");
-        cell.innerHTML = `
-          <div class="day-top-row">
-            <span class="day-number">${d}</span>
-            ${cambioBadge}
-          </div>
-          <div class="day-info">
-            <span class="day-time-text" style="color: var(--riposo-text);">Riposo</span>
-          </div>
-        `;
-      } else if (shift.isApertura || shift.isChiusura) {
-        // EVIDENZIA IN GIALLO I GIORNI DI APERTURA O CHIUSURA
-        cell.classList.add("is-speciale");
-        
-        let tagHtml = "";
-        if (shift.isApertura && shift.isChiusura) {
-          tagHtml = `<span class="day-badge-tag tag-apertura">Aper</span><span class="day-badge-tag tag-chiusura">Chiu</span>`;
-        } else if (shift.isApertura) {
-          tagHtml = `<span class="day-badge-tag tag-apertura">Apertura</span>`;
-        } else {
-          tagHtml = `<span class="day-badge-tag tag-chiusura">Chiusura</span>`;
-        }
-        
-        cell.innerHTML = `
-          <div class="day-top-row">
-            <span class="day-number">${d}</span>
-            <div style="display: flex; align-items: center; gap: 3px;">
-              ${cambioBadge}
-              <span class="hours-pill">${shift.totalHours}h</span>
-            </div>
-          </div>
-          <div class="day-info">
-            <div style="display: flex; gap: 2px; flex-wrap: wrap;">${tagHtml}</div>
-            <span class="day-time-text">${shift.startTime} - ${shift.endTime}</span>
-          </div>
-        `;
-      } else {
-        // TURNO REGOLARE STANDARD
-        cell.classList.add("is-normale");
-        cell.innerHTML = `
-          <div class="day-top-row">
-            <span class="day-number">${d}</span>
-            <div style="display: flex; align-items: center; gap: 3px;">
-              ${cambioBadge}
-              <span class="hours-pill">${shift.totalHours}h</span>
-            </div>
-          </div>
-          <div class="day-info">
-            <span class="day-time-text">${shift.startTime} - ${shift.endTime}</span>
-          </div>
-        `;
-      }
-      
-      // Click per aprire il modale di dettaglio
-      cell.addEventListener("click", () => {
-        openDayDetailModal(thisDate, shift);
-      });
-    } else {
-      // Giorno senza dati importati
-      cell.innerHTML = `
-        <div class="day-top-row">
-          <span class="day-number">${d}</span>
-        </div>
-      `;
-    }
-    
-    grid.appendChild(cell);
-  }
+  return cell;
 }
 
 function updateMonthlyStats() {
@@ -833,6 +881,7 @@ function updateMonthlyStats() {
   let chiusure = 0;
   let totalOvertime = 0;
   
+  // Il riepilogo tiene conto ESCLUSIVAMENTE dei giorni che fanno parte del mese in corso selezionato
   Object.keys(APP_STATE.shiftsData).forEach(dateKey => {
     const [y, m] = dateKey.split("-").map(Number);
     if (y === year && (m - 1) === month) {
@@ -858,6 +907,206 @@ function updateMonthlyStats() {
   document.getElementById("statChiusure").textContent = chiusure;
   const otEl = document.getElementById("statOvertime");
   if (otEl) otEl.textContent = `${Math.round(totalOvertime * 10) / 10}h`;
+
+  // Aggiorna anche il commento elaborato dalla AI per il mese in corso e il trend
+  renderAICommentary();
+}
+
+/**
+ * Elabora un commento intelligente generato dalla AI
+ * che valuta il mese visualizzato e lo confronta con i mesi precedenti
+ */
+function renderAICommentary() {
+  const container = document.getElementById("aiInsightContent");
+  const monthBadge = document.getElementById("aiMonthBadge");
+  if (!container) return;
+
+  const currentYear = APP_STATE.currentDate.getFullYear();
+  const currentMonth = APP_STATE.currentDate.getMonth();
+  const monthNamesIt = [
+    "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+    "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
+  ];
+  const currentMonthName = `${monthNamesIt[currentMonth]} ${currentYear}`;
+  if (monthBadge) monthBadge.textContent = currentMonthName;
+
+  let curTotalHours = 0;
+  let curWorkDays = 0;
+  let curRestDays = 0;
+  let curOpenings = 0;
+  let curClosings = 0;
+  let curOvertime = 0;
+  let curWeekendShifts = 0;
+  const curWeeksSet = new Set();
+
+  const monthsData = {};
+
+  Object.keys(APP_STATE.shiftsData || {}).forEach(dateKey => {
+    const [y, m] = dateKey.split("-").map(Number);
+    const mKey = `${y}-${String(m).padStart(2, '0')}`;
+    const shift = APP_STATE.shiftsData[dateKey];
+    
+    if (!monthsData[mKey]) {
+      monthsData[mKey] = {
+        year: y,
+        monthIndex: m - 1,
+        totalHours: 0,
+        workDays: 0,
+        restDays: 0,
+        openings: 0,
+        closings: 0,
+        overtime: 0,
+        shiftsCount: 0
+      };
+    }
+
+    const h = shift.totalHours || 0;
+    const ot = shift.overtimeHours !== undefined ? shift.overtimeHours : (h > 5 ? Math.round((h - 5) * 10) / 10 : 0);
+    const isWeekend = (shift.dayName === "Sabato" || shift.dayName === "Domenica");
+
+    monthsData[mKey].shiftsCount++;
+    if (shift.isRiposo) {
+      monthsData[mKey].restDays++;
+    } else {
+      monthsData[mKey].workDays++;
+      monthsData[mKey].totalHours += h;
+      monthsData[mKey].overtime += ot;
+      if (shift.isApertura) monthsData[mKey].openings++;
+      if (shift.isChiusura) monthsData[mKey].closings++;
+    }
+
+    if (y === currentYear && (m - 1) === currentMonth) {
+      if (shift.weekIndex) curWeeksSet.add(shift.weekIndex);
+      if (shift.isRiposo) {
+        curRestDays++;
+      } else {
+        curWorkDays++;
+        curTotalHours += h;
+        curOvertime += ot;
+        if (shift.isApertura) curOpenings++;
+        if (shift.isChiusura) curClosings++;
+        if (isWeekend) curWeekendShifts++;
+      }
+    }
+  });
+
+  const curWeeksCount = Math.max(1, curWeeksSet.size);
+  const curWeeklyAvg = (curTotalHours / curWeeksCount).toFixed(1);
+
+  if (curWorkDays === 0 && curRestDays === 0) {
+    container.innerHTML = `
+      <p style="color: var(--text-muted); font-style: italic;">
+        Nessun turno registrato per ${currentMonthName}. Carica un file orari per visualizzare l'elaborazione predittiva e l'analisi AI.
+      </p>
+    `;
+    return;
+  }
+
+  // Trova i mesi precedenti cronologicamente rispetto a quello corrente
+  const curKey = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}`;
+  const previousMonthKeys = Object.keys(monthsData)
+    .filter(k => k < curKey && monthsData[k].shiftsCount > 0)
+    .sort();
+
+  let comparisonHtml = "";
+  if (previousMonthKeys.length > 0) {
+    const lastPrevKey = previousMonthKeys[previousMonthKeys.length - 1];
+    const prev = monthsData[lastPrevKey];
+    const prevMonthName = `${monthNamesIt[prev.monthIndex]} ${prev.year}`;
+
+    const deltaHours = Math.round((curTotalHours - prev.totalHours) * 10) / 10;
+    const deltaOvertime = Math.round((curOvertime - prev.overtime) * 10) / 10;
+    const deltaClosings = curClosings - prev.closings;
+
+    let hoursTrendDesc = "";
+    if (deltaHours > 0) {
+      hoursTrendDesc = `un incremento di <strong>+${deltaHours}h</strong> rispetto a ${prevMonthName} (${prev.totalHours}h)`;
+    } else if (deltaHours < 0) {
+      hoursTrendDesc = `una riduzione di <strong>${deltaHours}h</strong> rispetto a ${prevMonthName} (${prev.totalHours}h)`;
+    } else {
+      hoursTrendDesc = `un monte ore identico a ${prevMonthName} (${prev.totalHours}h)`;
+    }
+
+    let otTrendDesc = "";
+    if (deltaOvertime > 0) {
+      otTrendDesc = `aumento dello straordinario (+${deltaOvertime}h)`;
+    } else if (deltaOvertime < 0) {
+      otTrendDesc = `riduzione dello straordinario (${deltaOvertime}h)`;
+    } else {
+      otTrendDesc = `straordinari stabili`;
+    }
+
+    let closingsTrendDesc = "";
+    if (deltaClosings > 0) {
+      closingsTrendDesc = `carico serale più accentuato (+${deltaClosings} chiusure)`;
+    } else if (deltaClosings < 0) {
+      closingsTrendDesc = `carico serale più leggero (${deltaClosings} chiusure)`;
+    } else {
+      closingsTrendDesc = `chiusure serali bilanciate (${curClosings})`;
+    }
+
+    comparisonHtml = `
+      <div class="ai-compare-box">
+        <div class="ai-compare-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="m3 16 7-7 4 4 7-7"/>
+            <path d="M14 6h7v7"/>
+          </svg>
+          Confronto con ${prevMonthName}:
+        </div>
+        <div>
+          Il piano presenze registra ${hoursTrendDesc}, con ${otTrendDesc} e ${closingsTrendDesc}.
+        </div>
+      </div>
+    `;
+  } else {
+    comparisonHtml = `
+      <div class="ai-compare-box">
+        <div class="ai-compare-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+          Confronto con mesi precedenti:
+        </div>
+        <div>
+          Questo mese costituisce il primo riferimento orari nell'archivio storico dell'applicazione e servirà da riferimento comparativo automatico per i prossimi mesi importati.
+        </div>
+      </div>
+    `;
+  }
+
+  // Valutazione del carico contrattuale (20h)
+  let contractAdherence = "";
+  if (curWeeklyAvg >= 19.5 && curWeeklyAvg <= 20.5) {
+    contractAdherence = `perfettamente allineata al contratto di <strong>20h settimanali</strong>`;
+  } else if (curWeeklyAvg > 20.5) {
+    contractAdherence = `leggermente superiore alla base contrattuale (${curWeeklyAvg}h/settimana)`;
+  } else {
+    contractAdherence = `moderata rispetto alla base contrattuale (${curWeeklyAvg}h/settimana)`;
+  }
+
+  let adviceText = "";
+  if (curClosings >= 5) {
+    adviceText = `Con ${curClosings} turni di chiusura (fino alle 22:00), la pianificazione dei riposi permette un buon recupero delle energie serali.`;
+  } else if (curOvertime > 0) {
+    adviceText = `Gli straordinari accumulati (${curOvertime}h) sono stati ben distribuiti e non hanno saturato le settimane successive.`;
+  } else {
+    adviceText = `I ${curRestDays} giorni di riposo garantiscono un'ottima continuità e una frequenza equilibrata tra aperture e orari intermedi.`;
+  }
+
+  container.innerHTML = `
+    <p>
+      Per <strong>${currentMonthName}</strong> sono previste <strong>${curTotalHours} ore lavorative</strong> su <strong>${curWorkDays} giorni di attività</strong> e <strong>${curRestDays} giorni di riposo</strong>, con una media ${contractAdherence}.
+    </p>
+    <p>
+      Il calendario evidenzia <strong>${curClosings} turni di chiusura</strong> (≥ 21:00), <strong>${curOpenings} aperture</strong> (≤ 09:30) e <strong>${curWeekendShifts} presenze nel weekend</strong>${curOvertime > 0 ? `, oltre a <strong>${curOvertime}h di straordinario</strong>` : ""}.
+    </p>
+    ${comparisonHtml}
+    <p style="margin-top: 8px; font-size: 0.76rem; color: var(--text-muted);">
+      💡 <em>Nota AI</em>: ${adviceText}
+    </p>
+  `;
 }
 
 // =============================================================================
@@ -874,12 +1123,12 @@ function openDayDetailModal(dateObj, shift) {
   
   let badgeType = "";
   if (shift.isRiposo) {
-    badgeType = `<span class="day-badge-tag tag-riposo" style="font-size: 0.8rem; padding: 4px 8px;">Giorno di Riposo (Verde)</span>`;
+    badgeType = `<span class="day-badge-tag tag-riposo" style="font-size: 0.8rem; padding: 4px 8px;">Giorno di Riposo</span>`;
   } else if (shift.isApertura || shift.isChiusura) {
     const list = [];
     if (shift.isApertura) list.push("Apertura Negozio");
     if (shift.isChiusura) list.push("Chiusura Negozio");
-    badgeType = `<span class="day-badge-tag tag-apertura" style="font-size: 0.8rem; padding: 4px 8px;">${list.join(" & ")} (Giallo)</span>`;
+    badgeType = `<span class="day-badge-tag tag-apertura" style="font-size: 0.8rem; padding: 4px 8px;">${list.join(" & ")}</span>`;
   } else {
     badgeType = `<span class="status-pill" style="font-size: 0.8rem; padding: 4px 8px;">Turno Regolare</span>`;
   }
@@ -1791,6 +2040,10 @@ window.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       console.warn("Errore lettura cache locale:", e);
     }
+  } else {
+    syncCalendarToActiveMonth();
+    renderCalendar();
+    updateMonthlyStats();
   }
   
   // Inizializza verifica accesso PIN

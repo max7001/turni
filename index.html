@@ -149,11 +149,11 @@
     <div class="legend-bar">
       <div class="legend-item">
         <span class="legend-dot riposo"></span>
-        <span>Riposo (Verde)</span>
+        <span>Riposo</span>
       </div>
       <div class="legend-item">
         <span class="legend-dot apertura-chiusura"></span>
-        <span>Apertura / Chiusura (Giallo)</span>
+        <span>Apertura / Chiusura</span>
       </div>
       <div class="legend-item">
         <span class="legend-dot normale"></span>
@@ -194,6 +194,31 @@
         <!-- Rendered dynamically by app.js -->
       </div>
     </main>
+
+    <!-- Commento Elaborato dalla AI sul Mese in Corso & Trend Mesi Precedenti -->
+    <section class="ai-insight-card" id="aiInsightSection">
+      <div class="ai-insight-header">
+        <div class="ai-insight-title-wrap">
+          <div class="ai-sparkle-icon">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/>
+              <path d="M5 3v4"/>
+              <path d="M19 17v4"/>
+              <path d="M3 5h4"/>
+              <path d="M17 19h4"/>
+            </svg>
+          </div>
+          <div>
+            <div class="ai-insight-title">Analisi Intelligente AI</div>
+            <div class="ai-insight-subtitle">Valutazione mese & confronto storico</div>
+          </div>
+        </div>
+        <span class="ai-insight-pill" id="aiMonthBadge">Settembre 2026</span>
+      </div>
+      <div class="ai-insight-content" id="aiInsightContent">
+        <!-- Elaborato dinamicamente da app.js -->
+      </div>
+    </section>
 
     <!-- Statistiche & Riepilogo Mensile -->
     <section class="stats-card">
@@ -308,7 +333,7 @@
               </svg>
             </div>
             <div class="kpi-value" id="kpiRestDays">0</div>
-            <div class="kpi-label">Giorni di Riposo (Verde)</div>
+            <div class="kpi-label">Giorni di Riposo</div>
           </div>
 
           <div class="kpi-card">
@@ -522,7 +547,7 @@
             <span class="setting-name">Versione Software</span>
             <span class="setting-desc">Rilasci e aggiornamenti dell'applicazione</span>
           </div>
-          <span class="detail-item-val" style="color: var(--brand-primary);">v1.4.0</span>
+          <span class="detail-item-val" style="color: var(--brand-primary);">v1.5.0</span>
         </div>
         
         <!-- Stato Firebase Cloud -->

@@ -1,6 +1,6 @@
 /* ==========================================================================
    Gestione Orari - Mobile First CSS Stylesheet
-   Version 1.4.0
+   Version 1.5.0
    ========================================================================== */
 
 :root {
@@ -382,10 +382,28 @@ body {
 }
 
 .day-cell.other-month {
-  opacity: 0.35;
-  background-color: transparent;
+  opacity: 0.4;
+  background-color: var(--bg-surface);
   border-color: var(--border-light);
-  cursor: default;
+  border-style: dashed;
+}
+
+.day-cell.other-month.is-speciale {
+  opacity: 0.8;
+  border-style: dashed;
+  cursor: pointer;
+}
+
+.day-cell.other-month.is-riposo {
+  opacity: 0.8;
+  border-style: dashed;
+  cursor: pointer;
+}
+
+.day-cell.other-month.is-normale {
+  opacity: 0.8;
+  border-style: dashed;
+  cursor: pointer;
 }
 
 .day-cell.today {
@@ -1342,4 +1360,122 @@ body {
   align-items: center;
   font-size: 0.76rem;
   color: var(--text-secondary);
+}
+
+/* ==========================================================================
+   AI Insight Card (Sotto il Calendario)
+   ========================================================================== */
+.ai-insight-card {
+  margin: 12px 12px 16px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.08) 0%, rgba(59, 130, 246, 0.04) 100%);
+  border: 1px solid rgba(139, 92, 246, 0.28);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: 0 2px 10px rgba(139, 92, 246, 0.06);
+  position: relative;
+  overflow: hidden;
+}
+
+[data-theme="dark"] .ai-insight-card {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.14) 0%, rgba(59, 130, 246, 0.08) 100%);
+  border-color: rgba(139, 92, 246, 0.4);
+}
+
+.ai-insight-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: linear-gradient(180deg, #8b5cf6, #3b82f6);
+  border-top-left-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-md);
+}
+
+.ai-insight-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.ai-insight-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-sparkle-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px rgba(139, 92, 246, 0.35);
+  flex-shrink: 0;
+}
+
+.ai-insight-title {
+  font-size: 0.84rem;
+  font-weight: 800;
+  color: var(--text-primary);
+  line-height: 1.15;
+}
+
+.ai-insight-subtitle {
+  font-size: 0.65rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.ai-insight-pill {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+  border: 1px solid rgba(139, 92, 246, 0.25);
+  white-space: nowrap;
+}
+
+.ai-insight-content {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.ai-insight-content p {
+  margin: 0 0 8px 0;
+}
+
+.ai-insight-content p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-insight-content strong {
+  color: var(--text-primary);
+}
+
+.ai-compare-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  font-size: 0.77rem;
+  line-height: 1.5;
+}
+
+.ai-compare-title {
+  font-weight: 700;
+  color: #8b5cf6;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }

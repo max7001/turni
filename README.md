@@ -17,7 +17,7 @@ Applicazione web progressiva (PWA) ottimizzata per smartphone per la visualizzaz
    - Nella casella di ciascun giorno sono riportati l'orario di inizio e fine lavoro e il totale delle ore.
 
 2. **🤖 Commento Elaborato dalla AI (Novità v1.5.0)**:
-   - **Card Analisi AI sotto il calendario**: elabora dinamicamente una valutazione approfondita del mese in corso.
+   - **Card Analisi AI sotto il riepilogo del mese**: elabora dinamicamente una valutazione approfondita del mese in corso.
    - **Metriche analizzate**: ore complessive, media settimanale rispetto al contratto part-time da 20h, rapporto tra giorni lavorati e di riposo, frequenza aperture/chiusure, weekend e ore di straordinario.
    - **Confronto trend con i mesi precedenti**: calcola l'incremento o decremento delle ore totali, l'andamento degli straordinari e l'intensità delle chiusure serali rispetto al mese precedente.
    - **Suggerimento pratico dell'assistente**: consigli mirati sul recupero e sulla gestione dei ritmi di lavoro.

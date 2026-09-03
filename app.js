@@ -508,38 +508,40 @@ function handleIncomingShifts(incomingShifts, fileName, giusyRowsCount) {
   // Identifica i mesi presenti nel nuovo file (formato "YYYY-MM")
   const incomingMonthKeys = Array.from(new Set(incomingDateKeys.map(d => d.slice(0, 7))));
   
-  // Identifica i mesi già memorizzati nei dati correnti dell'app
+  // Identifica le date e i mesi già memorizzati nei dati correnti dell'app
   const existingDateKeys = Object.keys(APP_STATE.shiftsData || {});
   const existingMonthKeys = new Set(existingDateKeys.map(d => d.slice(0, 7)));
+
+  // Trova le date coincidenti già memorizzate
+  const overlappingDates = incomingDateKeys.filter(d => existingDateKeys.includes(d));
 
   // Trova se ci sono giorni con orario variato manualmente che verrebbero sovrascritti
   const manualOverlapDates = incomingDateKeys.filter(d => APP_STATE.shiftsData[d] && APP_STATE.shiftsData[d].isManualChange);
 
-  // Trova i mesi in conflitto che hanno già almeno 3 turni registrati
+  // Trova i mesi in cui ci sono date coincidenti
   const conflictingMonths = incomingMonthKeys.filter(m => {
-    if (!existingMonthKeys.has(m)) return false;
-    const countInMonth = existingDateKeys.filter(d => d.startsWith(m)).length;
-    return countInMonth >= 3;
+    return overlappingDates.some(d => d.startsWith(m));
   });
 
   if (conflictingMonths.length > 0 || manualOverlapDates.length > 0) {
-    // Richiede conferma e autorizzazione esplicita prima di sovrascrivere
+    // Richiede conferma prima di sovrascrivere i giorni coincidenti
     pendingImport = {
       incomingShifts,
       fileName,
       totalWeeks: giusyRowsCount,
       conflictingMonths,
-      manualOverlapDates
+      manualOverlapDates,
+      overlappingDates
     };
-    showConflictModal(conflictingMonths, manualOverlapDates);
+    showConflictModal(conflictingMonths, manualOverlapDates, overlappingDates);
   } else {
-    // Mese nuovo e nessuna variazione manuale in gioco: aggiungi direttamente
+    // Tutte date nuove e nessuna variazione manuale: aggiungi direttamente
     executeImportMerge(incomingShifts, [], fileName, giusyRowsCount, true);
     showToast("Nuovi turni aggiunti con successo a quelli già memorizzati!");
   }
 }
 
-function showConflictModal(conflictingMonths, manualOverlapDates = []) {
+function showConflictModal(conflictingMonths, manualOverlapDates = [], overlappingDates = []) {
   const monthNamesIt = [
     "Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"
@@ -567,14 +569,14 @@ function showConflictModal(conflictingMonths, manualOverlapDates = []) {
     }).join("<br>");
     
     if (msgEl) {
-      msgEl.innerHTML = `Il file caricato contiene turni che andrebbero a sovrascrivere <strong>${manualOverlapDates.length} turno/i con orario variato manualmente</strong>.<br><br>I turni con orario variato non possono essere sovrascritti se non con la tua autorizzazione esplicita.`;
+      msgEl.innerHTML = `Il file caricato contiene turni che andrebbero a sovrascrivere <strong>${manualOverlapDates.length} turno/i con orario variato manualmente</strong>.<br><br>I turni con orario variato non possono essere sovrascritti se non con la tua autorizzazione esplicita.<br><em>Nota: gli altri giorni già memorizzati dello stesso mese non inclusi nel file rimarranno inalterati.</em>`;
     }
   } else {
     manualNotice.style.display = "none";
     btnKeep.style.display = "none";
-    btnConfirmText.textContent = "Sostituisci Dati Mese";
+    btnConfirmText.textContent = "Aggiorna Giorni Presenti nel File";
     if (msgEl) {
-      msgEl.innerHTML = `I dati caricati contengono turni per <strong>${formattedMonths}</strong>, che risultano già memorizzati in precedenza.<br><br>Vuoi <strong>sostituire i dati di ${formattedMonths}</strong> con quelli del nuovo file oppure annullare l'operazione?`;
+      msgEl.innerHTML = `Il file contiene <strong>${overlappingDates.length} giornate</strong> di <strong>${formattedMonths}</strong> già memorizzate in precedenza.<br><br>Confermi di voler <strong>sovrascrivere solo i giorni presenti nel file</strong>? Gli altri giorni dello stesso mese (ad es. caricati da altri file) rimarranno <strong>inalterati</strong>.`;
     }
   }
 
@@ -587,28 +589,17 @@ function closeConflictModal() {
 }
 
 /**
- * Esegue l'unione dei nuovi turni con quelli preesistenti
- * Se preserveManualChanges è true, non sovrascrive mai i giorni con modifiche manuali
+ * Esegue l'unione dei nuovi turni con quelli preesistenti.
+ * Sovrascrive ESCLUSIVAMENTE i giorni presenti nel file caricato.
+ * Lascia completamente inalterati i giorni dello stesso mese (o di altri mesi)
+ * che non sono inclusi nel file caricato.
  */
 function executeImportMerge(incomingShifts, replaceMonths = [], fileName = "import.xlsx", totalWeeks = 0, preserveManualChanges = true) {
   // Inizia con una copia dei dati già memorizzati in precedenza
+  // TUTTI i giorni esistenti non inclusi in incomingShifts rimangono inalterati
   const merged = { ...APP_STATE.shiftsData };
 
-  // Se è richiesta la sostituzione di determinati mesi, cancella solo le date di quei mesi (preservando i cambi manuali se richiesto)
-  if (replaceMonths.length > 0) {
-    const replaceSet = new Set(replaceMonths);
-    Object.keys(merged).forEach(dateKey => {
-      if (replaceSet.has(dateKey.slice(0, 7))) {
-        if (preserveManualChanges && merged[dateKey] && merged[dateKey].isManualChange) {
-          // Proteggi la variazione manuale!
-        } else {
-          delete merged[dateKey];
-        }
-      }
-    });
-  }
-
-  // Aggiungi tutti i turni del file caricato
+  // Sovrascrivi SOLO i giorni presenti nel file caricato
   Object.keys(incomingShifts).forEach(dateKey => {
     if (preserveManualChanges && merged[dateKey] && merged[dateKey].isManualChange) {
       // Protezione: non sovrascrivere il giorno modificato manualmente senza autorizzazione esplicita
@@ -1699,7 +1690,7 @@ if (btnKeepManual) {
       const { incomingShifts, conflictingMonths, fileName, totalWeeks } = pendingImport;
       executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks, true /* preserveManualChanges */);
       closeConflictModal();
-      showToast("Turni importati proteggendo tutte le modifiche manuali!");
+      showToast("Giorni aggiornati proteggendo le modifiche manuali (gli altri giorni sono rimasti inalterati)!");
     }
   });
 }
@@ -1710,7 +1701,7 @@ document.getElementById("btnConfirmReplaceMonth").addEventListener("click", () =
     // Autorizzazione esplicita a sovrascrivere tutto compresi i turni variati
     executeImportMerge(incomingShifts, conflictingMonths, fileName, totalWeeks, false /* allow overwrite */);
     closeConflictModal();
-    showToast("Turni sostituiti con autorizzazione esplicita!");
+    showToast("Giorni presenti nel file aggiornati (gli altri giorni sono rimasti inalterati)!");
   }
 });
 

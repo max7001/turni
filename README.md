@@ -32,8 +32,8 @@ Applicazione web progressiva (PWA) ottimizzata per smartphone per la visualizzaz
 5. **📥 Acquisizione Intelligente da Excel & Gestione Mesi**:
    - **Giorni a cavallo del mese successivo**: include automaticamente anche i turni dei primi giorni del mese successivo presenti nella settimana finale (es. 1, 2, 3 Ottobre nel file di Settembre).
    - **Filtro giorni non compilati**: non importa le giornate in cui non è stato compilato l'orario per nessuna persona dell'intero negozio.
-   - **Aggiunta cumulativa**: i turni di nuovi mesi si sommano all'archivio senza cancellare i mesi precedenti.
-   - **Conferma per mesi doppi**: se un mese è già presente, l'app chiede se si desidera sostituirlo.
+   - **Aggiunta cumulativa e sovrascrittura selettiva dei soli giorni presenti**: quando si importa un nuovo file, l'app sovrascrive **esclusivamente i giorni contenuti nel file** lasciando **inalterati** tutti gli altri giorni dello stesso mese (o di mesi diversi) che non sono inclusi nel file e che erano stati importati in precedenza da altri file.
+   - **Conferma per date coincidenti**: se un file contiene date già presenti in archivio, l'app chiede conferma prima di aggiornare tali date, salvaguardando le modifiche manuali salvo autorizzazione esplicita.
 
 6. **📊 Schermata Statistiche & Sezione Cambi**:
    - Simbolo **Statistiche** nella barra superiore.
@@ -44,18 +44,18 @@ Applicazione web progressiva (PWA) ottimizzata per smartphone per la visualizzaz
 7. **Banner Periodo Turni (in alto nella schermata principale)**:
    - Mostra l'intervallo iniziale e finale delle date relative ai turni importati (es. `6 Settembre 2026 — 3 Ottobre 2026`).
 
-4. **Sincronizzazione Cloud Firebase**:
+8. **Sincronizzazione Cloud Firebase**:
    - Ad ogni importazione o aggiornamento mese, i dati cumulativi vengono sincronizzati su Firebase (sia come stato corrente che nello storico per statistiche future).
    - Funzionamento offline garantito: i turni vengono memorizzati anche in locale (`localStorage`) per essere sempre disponibili anche in assenza di connessione.
 
-5. **Schermata Impostazioni**:
+9. **Schermata Impostazioni**:
    - Tasto **Impostazioni** (icona ingranaggio in alto a destra).
    - Scelta del tema: **Chiaro** o **Scuro**.
-   - Versione software indicata: **v1.2.0**.
+   - Versione software indicata: **v1.4.0**.
    - Stato della sincronizzazione Firebase.
    - Pulsante per ribloccare l'applicazione con password.
 
-6. **Sicurezza e Crittografia Avanzata**:
+10. **Sicurezza e Crittografia Avanzata**:
    - Accesso protetto con codice password **`121208`**.
    - Lo smartphone memorizza la sessione in modo sicuro e non richiede più la password agli accessi successivi.
    - **Tutti i dati sensibili sono crittografati**: la password è verificata tramite hashing crittografico `SHA-256`, mentre le chiavi API e i parametri di configurazione di Firebase sono memorizzati in forma cifrata e decifrati dinamicamente solo in memoria a runtime.

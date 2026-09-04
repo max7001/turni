@@ -66,30 +66,53 @@ const APP_STATE = {
 // 3. INIZIALIZZAZIONE FIREBASE (Dinamica ed asincrona)
 // =============================================================================
 
-async function initFirebase(hashKey) {
-  const config = decryptFirebaseCredentials(hashKey);
-  if (!config) {
-    updateFirebaseStatus(false, "Configurazione non disponibile");
-    return;
-  }
-  
-  try {
-    const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-    const { getFirestore, doc, setDoc, getDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+let firebaseInitPromise = null;
+let pendingCloudPayload = null;
+let unsubscribeRemoteListener = null;
+
+async function initFirebase(hashKey = HASH_AUTH_KEY) {
+  if (firebaseInitPromise) return firebaseInitPromise;
+
+  firebaseInitPromise = (async () => {
+    const config = decryptFirebaseCredentials(hashKey);
+    if (!config) {
+      updateFirebaseStatus(false, "Configurazione non disponibile");
+      return false;
+    }
     
-    const app = initializeApp(config);
-    const db = getFirestore(app);
-    APP_STATE.firebaseDb = db;
-    APP_STATE.firestoreOps = { doc, setDoc, getDoc };
-    
-    updateFirebaseStatus(true, "Connesso & Sincronizzato");
-    
-    // Prova a recuperare l'ultimo roster salvato su Firebase se non presente in locale
-    await loadRemoteShiftsIfAvailable();
-  } catch (e) {
-    console.warn("Firebase non connesso (funzionamento in modalità locale offline):", e);
-    updateFirebaseStatus(false, "Offline (Dati salvati in locale)");
-  }
+    try {
+      const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+      const { getFirestore, doc, setDoc, getDoc, onSnapshot } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+      
+      const app = getApps().length > 0 ? getApp() : initializeApp(config);
+      const db = getFirestore(app);
+      APP_STATE.firebaseDb = db;
+      APP_STATE.firestoreOps = { doc, setDoc, getDoc, onSnapshot };
+      
+      updateFirebaseStatus(true, "Connesso & Sincronizzato");
+      
+      // 1. Riconciliazione intelligente bidirezionale tra Cloud e Locale
+      await reconcileCloudAndLocalShifts();
+      
+      // 2. Se c'erano salvataggi in coda mentre Firebase si avviava, inviali ora
+      if (pendingCloudPayload) {
+        const queued = pendingCloudPayload;
+        pendingCloudPayload = null;
+        await syncToFirebase(queued);
+      }
+
+      // 3. Ascolto modifiche remote in tempo reale
+      listenToRemoteChanges();
+
+      return true;
+    } catch (e) {
+      console.warn("Firebase non connesso (funzionamento in modalità locale offline):", e);
+      updateFirebaseStatus(false, "Offline (Dati salvati in locale)");
+      return false;
+    }
+  })();
+
+  return firebaseInitPromise;
 }
 
 function updateFirebaseStatus(isOnline, message) {
@@ -105,42 +128,130 @@ function updateFirebaseStatus(isOnline, message) {
   }
 }
 
+/**
+ * Salva i dati correnti su Firestore.
+ * Pulisce qualsiasi valore undefined per evitare errori SDK e gestisce code offline.
+ */
 async function syncToFirebase(payload) {
+  if (!payload || !payload.shiftsData) return;
+
+  // Sanitizzazione rigorosa: rimuove undefined e prepara oggetto pulito per Firestore
+  const cleanPayload = JSON.parse(JSON.stringify(payload));
+  cleanPayload.lastUpdate = cleanPayload.lastUpdate || new Date().toISOString();
+
+  // Assicurati che Firebase sia pronto
   if (!APP_STATE.firebaseDb || !APP_STATE.firestoreOps) {
-    console.log("Firebase non attivo, salvataggio solo locale.");
+    if (firebaseInitPromise) {
+      await firebaseInitPromise;
+    } else {
+      initFirebase(HASH_AUTH_KEY);
+      if (firebaseInitPromise) await firebaseInitPromise;
+    }
+  }
+
+  if (!APP_STATE.firebaseDb || !APP_STATE.firestoreOps) {
+    console.warn("Firebase non pronto: salvataggio locale effettuato, sync in coda.");
+    pendingCloudPayload = cleanPayload;
+    updateFirebaseStatus(false, "Offline (Modifiche in attesa)");
     return;
   }
+
   try {
     const { doc, setDoc } = APP_STATE.firestoreOps;
-    // Salva sia come stato corrente che come record nello storico statistiche
-    await setDoc(doc(APP_STATE.firebaseDb, "turni_giusy", "current"), payload);
-    const historyId = `import_${Date.now()}`;
-    await setDoc(doc(APP_STATE.firebaseDb, "turni_giusy_history", historyId), payload);
-    showToast("Dati sincronizzati con successo su Firebase!");
+    
+    // Salva come stato principale corrente
+    await setDoc(doc(APP_STATE.firebaseDb, "turni_giusy", "current"), cleanPayload);
+    
+    // Salva record nello storico in modo non bloccante
+    try {
+      const historyId = `import_${Date.now()}`;
+      await setDoc(doc(APP_STATE.firebaseDb, "turni_giusy_history", historyId), cleanPayload);
+    } catch (histErr) {
+      console.warn("Avviso scrittura storico (non bloccante):", histErr);
+    }
+
+    updateFirebaseStatus(true, "Connesso & Sincronizzato");
+    const lastSyncEl = document.getElementById("lastSyncTimeText");
+    if (lastSyncEl) {
+      const timeStr = new Date().toLocaleTimeString("it-IT", { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      lastSyncEl.textContent = `Ultima sincronizzazione: oggi alle ${timeStr}`;
+    }
+
+    showToast("Modifiche salvate e sincronizzate su Firebase Cloud!");
   } catch (err) {
-    console.warn("Errore durante il salvataggio su Firebase:", err);
+    console.error("Errore salvataggio Firebase:", err);
+    updateFirebaseStatus(false, "Errore salvataggio cloud");
     showToast("Salvataggio locale completato (sincronizzazione cloud fallita).");
   }
 }
 
-async function loadRemoteShiftsIfAvailable() {
+/**
+ * Confronta i dati locali e quelli remoti in base a lastUpdate:
+ * - Se il Cloud ha dati più recenti, aggiorna il client locale
+ * - Se il client Locale ha dati più recenti, aggiorna il Cloud
+ */
+async function reconcileCloudAndLocalShifts() {
   if (!APP_STATE.firebaseDb || !APP_STATE.firestoreOps) return;
   try {
     const { doc, getDoc } = APP_STATE.firestoreOps;
     const snap = await getDoc(doc(APP_STATE.firebaseDb, "turni_giusy", "current"));
+
+    const localRaw = localStorage.getItem("giusy_shifts_payload");
+    const localPayload = localRaw ? JSON.parse(localRaw) : null;
+    const localTime = localPayload?.lastUpdate ? new Date(localPayload.lastUpdate).getTime() : 0;
+
     if (snap.exists()) {
       const remoteData = snap.data();
-      if (remoteData && remoteData.shiftsData) {
-        // Se non abbiamo ancora dati in locale o i dati remoti sono più recenti
-        const localSaved = localStorage.getItem("giusy_shifts_payload");
-        if (!localSaved) {
-          applyParsedData(remoteData, false);
-          showToast("Turni recuperati dal cloud Firebase");
+      const remoteTime = remoteData?.lastUpdate ? new Date(remoteData.lastUpdate).getTime() : 0;
+
+      if (remoteTime > localTime && remoteData.shiftsData) {
+        applyParsedData(remoteData, false);
+        const lastSyncEl = document.getElementById("lastSyncTimeText");
+        if (lastSyncEl) {
+          const timeStr = new Date(remoteTime).toLocaleTimeString("it-IT", { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          lastSyncEl.textContent = `Sincronizzato da Cloud (${timeStr})`;
         }
+        showToast("Turni sincronizzati con l'ultima versione dal cloud Firebase!");
+      } else if (localTime > remoteTime && localPayload?.shiftsData) {
+        await syncToFirebase(localPayload);
       }
+    } else if (localPayload && localPayload.shiftsData) {
+      await syncToFirebase(localPayload);
     }
-  } catch (e) {
-    console.warn("Impossibile recuperare i turni remoti:", e);
+  } catch (err) {
+    console.warn("Errore riconciliazione cloud:", err);
+  }
+}
+
+/**
+ * Ascolta aggiornamenti in tempo reale su Firestore
+ */
+function listenToRemoteChanges() {
+  if (!APP_STATE.firebaseDb || !APP_STATE.firestoreOps) return;
+  try {
+    const { doc, onSnapshot } = APP_STATE.firestoreOps;
+    if (unsubscribeRemoteListener) unsubscribeRemoteListener();
+
+    unsubscribeRemoteListener = onSnapshot(doc(APP_STATE.firebaseDb, "turni_giusy", "current"), (snap) => {
+      if (!snap.exists()) return;
+      const remoteData = snap.data();
+      if (!remoteData || !remoteData.shiftsData) return;
+
+      const localRaw = localStorage.getItem("giusy_shifts_payload");
+      const localPayload = localRaw ? JSON.parse(localRaw) : null;
+      const localTime = localPayload?.lastUpdate ? new Date(localPayload.lastUpdate).getTime() : 0;
+      const remoteTime = remoteData.lastUpdate ? new Date(remoteData.lastUpdate).getTime() : 0;
+
+      // Se il dato remoto è più recente di almeno 2 secondi rispetto a quello locale, aggiorna la UI
+      if (remoteTime > (localTime + 2000)) {
+        applyParsedData(remoteData, false);
+        showToast("Nuove modifiche ai turni sincronizzate in tempo reale dal cloud!");
+      }
+    }, (err) => {
+      console.warn("Snapshot listener error:", err);
+    });
+  } catch (err) {
+    console.warn("Errore avvio listener cloud:", err);
   }
 }
 
@@ -313,6 +424,106 @@ async function processExcelFile(file) {
       cellDates: true
     });
     
+    // 0. Individuazione caselle azzurre (giorni di Ferie) tramite JSZip
+    const azzurroCellRefs = new Set();
+    if (typeof JSZip !== "undefined") {
+      try {
+        const zip = await JSZip.loadAsync(data);
+        const stylesFile = zip.file("xl/styles.xml");
+        if (stylesFile) {
+          const stylesXml = await stylesFile.async("string");
+          
+          // Trova tutti gli ID di fill azzurri / ciano (es. FF33CCFF o ciano standard)
+          const azzurroFillIds = new Set();
+          const fillMatches = stylesXml.match(/<fill[\s\S]*?<\/fill>/gi) || [];
+          fillMatches.forEach((fillXml, idx) => {
+            const rgbMatch = fillXml.match(/rgb=["']([0-9A-Fa-f]{6,8})["']/i);
+            if (rgbMatch) {
+              const hex = rgbMatch[1].toUpperCase();
+              if (hex.endsWith("33CCFF") || hex === "FF33CCFF" || hex === "33CCFF" || hex.endsWith("00CCFF") || hex.endsWith("00FFFF")) {
+                azzurroFillIds.add(idx);
+              } else if (hex.length >= 6) {
+                const rawHex = hex.length === 8 ? hex.slice(2) : hex;
+                const r = parseInt(rawHex.slice(0, 2), 16);
+                const g = parseInt(rawHex.slice(2, 4), 16);
+                const b = parseInt(rawHex.slice(4, 6), 16);
+                if (b >= 220 && g >= 160 && r <= 100) {
+                  azzurroFillIds.add(idx);
+                }
+              }
+            }
+            const indexedMatch = fillXml.match(/indexed=["'](\d+)["']/i);
+            if (indexedMatch) {
+              const idxVal = parseInt(indexedMatch[1], 10);
+              if (idxVal === 41 || idxVal === 42 || idxVal === 9) {
+                azzurroFillIds.add(idx);
+              }
+            }
+          });
+
+          // Trova tutti gli xf che fanno riferimento a un fillId azzurro
+          const azzurroXfIds = new Set();
+          const cellXfsMatch = stylesXml.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/i);
+          if (cellXfsMatch) {
+            const xfMatches = cellXfsMatch[1].match(/<xf[\s\S]*?>/gi) || [];
+            xfMatches.forEach((xfXml, xfIdx) => {
+              const fillIdMatch = xfXml.match(/fillId=["'](\d+)["']/i);
+              if (fillIdMatch && azzurroFillIds.has(parseInt(fillIdMatch[1], 10))) {
+                azzurroXfIds.add(String(xfIdx));
+              }
+            });
+          }
+
+          // Individua il worksheet per "Inserimento Orari"
+          let targetSheetPath = "xl/worksheets/sheet3.xml";
+          const wbFile = zip.file("xl/workbook.xml");
+          const relsFile = zip.file("xl/_rels/workbook.xml.rels");
+          if (wbFile && relsFile) {
+            const wbXml = await wbFile.async("string");
+            const relsXml = await relsFile.async("string");
+            const sheetTagMatch = wbXml.match(/<sheet[^>]*name=["'][^"']*inserimento[^"']*orari[^"']*["'][^>]*r:id=["']([^"']+)["']/i) ||
+                                  wbXml.match(/<sheet[^>]*r:id=["']([^"']+)["'][^>]*name=["'][^"']*inserimento[^"']*orari[^"']*["']/i);
+            if (sheetTagMatch) {
+              const relId = sheetTagMatch[1];
+              const targetMatch = relsXml.match(new RegExp(`<Relationship[^>]*Id=["']${relId}["'][^>]*Target=["']([^"']+)["']`, 'i'));
+              if (targetMatch) {
+                const rawTarget = targetMatch[1];
+                targetSheetPath = rawTarget.startsWith("worksheets/") ? `xl/${rawTarget}` : `xl/worksheets/${rawTarget.replace(/.*[\/\\]/, '')}`;
+              }
+            }
+          }
+
+          let sheetFile = zip.file(targetSheetPath);
+          if (!sheetFile) {
+            const wsFiles = Object.keys(zip.files).filter(k => k.startsWith("xl/worksheets/sheet"));
+            for (const wsKey of wsFiles) {
+              const content = await zip.files[wsKey].async("string");
+              if (content.includes('s="165"') || content.includes('s="142"')) {
+                sheetFile = zip.files[wsKey];
+                break;
+              }
+            }
+          }
+
+          if (sheetFile) {
+            const sheetXml = await sheetFile.async("string");
+            const cellRegex = /<c\s+([^>]*?)>/gi;
+            let cMatch;
+            while ((cMatch = cellRegex.exec(sheetXml)) !== null) {
+              const attrs = cMatch[1];
+              const rMatch = attrs.match(/r=["']([A-Z0-9]+)["']/i);
+              const sMatch = attrs.match(/s=["'](\d+)["']/i);
+              if (rMatch && sMatch && azzurroXfIds.has(sMatch[1])) {
+                azzurroCellRefs.add(rMatch[1].toUpperCase());
+              }
+            }
+          }
+        }
+      } catch (zipErr) {
+        console.warn("Avviso lettura caselle azzurre con JSZip:", zipErr);
+      }
+    }
+
     // 1. Individua solo il foglio "Inserimento Orari"
     const sheetName = workbook.SheetNames.find(name => 
       name.toLowerCase().trim().includes("inserimento") && name.toLowerCase().trim().includes("orari")
@@ -417,8 +628,16 @@ async function processExcelFile(file) {
         
         if (!dayDate) return;
 
-        // NON importare giorni se non sono stati compilati orari di nessuna persona nel negozio
-        if (!isDayCompiledForStore(dDef, staffStart, staffEnd)) {
+        // Verifica se la casella per Giusy è azzurra (Ferie)
+        const isAzzurraCell = azzurroCellRefs.has(`${dDef.inM}${gRow}`) ||
+                              azzurroCellRefs.has(`${dDef.outM}${gRow}`) ||
+                              azzurroCellRefs.has(`${dDef.inP}${gRow}`) ||
+                              azzurroCellRefs.has(`${dDef.outP}${gRow}`) ||
+                              azzurroCellRefs.has(`${dDef.tot}${gRow}`);
+
+        // NON importare giorni se non sono stati compilati orari di nessuna persona nel negozio,
+        // a meno che Giusy non abbia ferie esplicite per quel giorno
+        if (!isDayCompiledForStore(dDef, staffStart, staffEnd) && !isAzzurraCell) {
           return;
         }
         
@@ -435,11 +654,13 @@ async function processExcelFile(file) {
         const outAfternoon = formatDecimalHour(rawOutP);
         const totalHoursNum = rawTot ? parseFloat(String(rawTot).replace(",", ".")) : 0;
         
-        const hasWork = (inMorning && outMorning) || (inAfternoon && outAfternoon) || totalHoursNum > 0;
+        // Se la casella è azzurra, è considerata un giorno di FERIE (NON di riposo)
+        const isFerie = isAzzurraCell;
+        const hasWork = !isFerie && ((inMorning && outMorning) || (inAfternoon && outAfternoon) || totalHoursNum > 0);
         
         // Riconoscimento orario iniziale e finale complessivo della giornata
-        const startTime = inMorning || inAfternoon || null;
-        const endTime = outAfternoon || outMorning || null;
+        const startTime = hasWork ? (inMorning || inAfternoon || null) : null;
+        const endTime = hasWork ? (outAfternoon || outMorning || null) : null;
         
         // Valutazione Apertura e Chiusura:
         // Apertura: ingresso mattina <= 09:30
@@ -449,7 +670,8 @@ async function processExcelFile(file) {
         
         const isApertura = hasWork && startDec !== null && startDec <= 9.5;
         const isChiusura = hasWork && endDec !== null && endDec >= 21.0;
-        const isRiposo = !hasWork || totalHoursNum === 0;
+        // NOTA: I giorni di Ferie NON sono giorni di Riposo!
+        const isRiposo = !isFerie && (!hasWork || totalHoursNum === 0);
         
         const dateKey = formatDateKey(dayDate);
         
@@ -460,24 +682,25 @@ async function processExcelFile(file) {
           weekLabel: `Settimana ${gIdx + 1}`,
           hasWork,
           isRiposo,
+          isFerie,
           isApertura,
           isChiusura,
-          inMorning,
-          outMorning,
-          inAfternoon,
-          outAfternoon,
+          inMorning: isFerie ? null : inMorning,
+          outMorning: isFerie ? null : outMorning,
+          inAfternoon: isFerie ? null : inAfternoon,
+          outAfternoon: isFerie ? null : outAfternoon,
           startTime,
           endTime,
-          totalHours: isRiposo ? 0 : totalHoursNum,
+          totalHours: (isRiposo || isFerie) ? 0 : totalHoursNum,
           overtimeHours: (hasWork && totalHoursNum > 5) ? Math.round((totalHoursNum - 5) * 10) / 10 : 0,
-          displayHours: hasWork ? (
+          displayHours: isFerie ? "Ferie" : (hasWork ? (
             inMorning && outMorning && inAfternoon && outAfternoon ? 
               `${inMorning}-${outMorning} / ${inAfternoon}-${outAfternoon}` : 
               (inMorning && outMorning ? `${inMorning} - ${outMorning}` : `${inAfternoon} - ${outAfternoon}`)
-          ) : "Riposo"
+          ) : "Riposo")
         };
         
-        if (hasWork) {
+        if (hasWork || isFerie) {
           validDates.push(dayDate);
         }
       });
@@ -802,7 +1025,19 @@ function createDayCell(dateObj, shift, isOtherMonth = false) {
 
     const cambioBadge = shift.isManualChange ? `<span class="day-badge-tag tag-cambio" title="Orario variato manualmente">⇄</span>` : "";
 
-    if (shift.isRiposo) {
+    if (shift.isFerie) {
+      // EVIDENZIA IN AZZURRO I GIORNI DI FERIE (NON DI RIPOSO)
+      cell.classList.add("is-ferie");
+      cell.innerHTML = `
+        <div class="day-top-row">
+          <span class="day-number">${d}</span>
+          ${cambioBadge}
+        </div>
+        <div class="day-info">
+          <span class="day-time-text" style="color: var(--ferie-text); font-weight: 700;">Ferie</span>
+        </div>
+      `;
+    } else if (shift.isRiposo) {
       // EVIDENZIA IN VERDE I GIORNI DI RIPOSO
       cell.classList.add("is-riposo");
       cell.innerHTML = `
@@ -886,7 +1121,9 @@ function updateMonthlyStats() {
     const [y, m] = dateKey.split("-").map(Number);
     if (y === year && (m - 1) === month) {
       const shift = APP_STATE.shiftsData[dateKey];
-      if (shift.isRiposo) {
+      if (shift.isFerie) {
+        // Ferie: NON è un giorno di riposo, non aggiunge a riposi né a totalHours
+      } else if (shift.isRiposo) {
         riposi++;
       } else {
         const h = (shift.totalHours || 0);
@@ -933,6 +1170,7 @@ function renderAICommentary() {
   let curTotalHours = 0;
   let curWorkDays = 0;
   let curRestDays = 0;
+  let curFerieDays = 0;
   let curOpenings = 0;
   let curClosings = 0;
   let curOvertime = 0;
@@ -953,6 +1191,7 @@ function renderAICommentary() {
         totalHours: 0,
         workDays: 0,
         restDays: 0,
+        ferieDays: 0,
         openings: 0,
         closings: 0,
         overtime: 0,
@@ -965,7 +1204,9 @@ function renderAICommentary() {
     const isWeekend = (shift.dayName === "Sabato" || shift.dayName === "Domenica");
 
     monthsData[mKey].shiftsCount++;
-    if (shift.isRiposo) {
+    if (shift.isFerie) {
+      monthsData[mKey].ferieDays = (monthsData[mKey].ferieDays || 0) + 1;
+    } else if (shift.isRiposo) {
       monthsData[mKey].restDays++;
     } else {
       monthsData[mKey].workDays++;
@@ -977,7 +1218,9 @@ function renderAICommentary() {
 
     if (y === currentYear && (m - 1) === currentMonth) {
       if (shift.weekIndex) curWeeksSet.add(shift.weekIndex);
-      if (shift.isRiposo) {
+      if (shift.isFerie) {
+        curFerieDays++;
+      } else if (shift.isRiposo) {
         curRestDays++;
       } else {
         curWorkDays++;
@@ -993,7 +1236,7 @@ function renderAICommentary() {
   const curWeeksCount = Math.max(1, curWeeksSet.size);
   const curWeeklyAvg = (curTotalHours / curWeeksCount).toFixed(1);
 
-  if (curWorkDays === 0 && curRestDays === 0) {
+  if (curWorkDays === 0 && curRestDays === 0 && curFerieDays === 0) {
     container.innerHTML = `
       <p style="color: var(--text-muted); font-style: italic;">
         Nessun turno registrato per ${currentMonthName}. Carica un file orari per visualizzare l'elaborazione predittiva e l'analisi AI.
@@ -1097,7 +1340,7 @@ function renderAICommentary() {
 
   container.innerHTML = `
     <p>
-      Per <strong>${currentMonthName}</strong> sono previste <strong>${curTotalHours} ore lavorative</strong> su <strong>${curWorkDays} giorni di attività</strong> e <strong>${curRestDays} giorni di riposo</strong>, con una media ${contractAdherence}.
+      Per <strong>${currentMonthName}</strong> sono previste <strong>${curTotalHours} ore lavorative</strong> su <strong>${curWorkDays} giorni di attività</strong>, <strong>${curRestDays} giorni di riposo</strong>${curFerieDays > 0 ? ` e <strong>${curFerieDays} giorni di ferie</strong>` : ""}, con una media ${contractAdherence}.
     </p>
     <p>
       Il calendario evidenzia <strong>${curClosings} turni di chiusura</strong> (≥ 21:00), <strong>${curOpenings} aperture</strong> (≤ 09:30) e <strong>${curWeekendShifts} presenze nel weekend</strong>${curOvertime > 0 ? `, oltre a <strong>${curOvertime}h di straordinario</strong>` : ""}.
@@ -1122,7 +1365,9 @@ function openDayDetailModal(dateObj, shift) {
   title.textContent = dateObj.toLocaleDateString("it-IT", options);
   
   let badgeType = "";
-  if (shift.isRiposo) {
+  if (shift.isFerie) {
+    badgeType = `<span class="day-badge-tag tag-ferie" style="font-size: 0.8rem; padding: 4px 8px;">Giorno di Ferie</span>`;
+  } else if (shift.isRiposo) {
     badgeType = `<span class="day-badge-tag tag-riposo" style="font-size: 0.8rem; padding: 4px 8px;">Giorno di Riposo</span>`;
   } else if (shift.isApertura || shift.isChiusura) {
     const list = [];
@@ -1135,6 +1380,15 @@ function openDayDetailModal(dateObj, shift) {
   
   let manualNoticeHtml = "";
   if (shift.isManualChange) {
+    let origDesc = "Riposo";
+    if (shift.originalIsFerie) {
+      origDesc = "Ferie (0 ore)";
+    } else if (shift.originalStartTime && shift.originalEndTime) {
+      origDesc = `${shift.originalStartTime} — ${shift.originalEndTime} (${shift.originalTotalHours !== undefined ? shift.originalTotalHours : 0} ore)`;
+    } else {
+      origDesc = `Riposo (${shift.originalTotalHours !== undefined ? shift.originalTotalHours : 0} ore)`;
+    }
+
     manualNoticeHtml = `
       <div style="background: rgba(139, 92, 246, 0.12); border: 1px solid rgba(139, 92, 246, 0.3); border-radius: var(--radius-sm); padding: 10px 12px; margin-bottom: 14px;">
         <div style="font-weight: 700; color: #8b5cf6; display: flex; align-items: center; gap: 6px; font-size: 0.84rem;">
@@ -1142,7 +1396,7 @@ function openDayDetailModal(dateObj, shift) {
           <span>Orario Variato Manualmente</span>
         </div>
         <div style="font-size: 0.76rem; color: var(--text-secondary); margin-top: 5px; line-height: 1.4;">
-          Orario originale file Excel: <strong>${shift.originalStartTime && shift.originalEndTime ? `${shift.originalStartTime} — ${shift.originalEndTime}` : 'Riposo'} (${shift.originalTotalHours !== undefined ? shift.originalTotalHours : 0} ore)</strong>
+          Orario originale file Excel: <strong>${origDesc}</strong>
           ${shift.changeNote ? `<br>Motivo: <em>${shift.changeNote}</em>` : ''}
         </div>
       </div>
@@ -1174,7 +1428,7 @@ function openDayDetailModal(dateObj, shift) {
     
     <div class="detail-item-card">
       <span class="detail-item-title">Inizio & Fine Effettivi</span>
-      <span class="detail-item-val" style="color: var(--brand-primary); font-weight: 700;">${shift.hasWork ? `${shift.startTime}  —  ${shift.endTime}` : "Nessun turno (Riposo)"}</span>
+      <span class="detail-item-val" style="color: var(--brand-primary); font-weight: 700;">${shift.hasWork ? `${shift.startTime}  —  ${shift.endTime}` : (shift.isFerie ? "Ferie (Vacanza)" : "Nessun turno (Riposo)")}</span>
     </div>
     
     <!-- Totale Ore Lavorate e Card Straordinario (se > 5 ore) -->
@@ -1214,12 +1468,16 @@ function openDayDetailModal(dateObj, shift) {
       </button>
 
       <div id="editShiftPanel" class="edit-shift-panel" style="display: none;">
-        <label class="checkbox-row" id="chkRiposoRow">
-          <input type="checkbox" id="chkIsRiposo" ${shift.isRiposo ? "checked" : ""}>
-          <span class="checkbox-label">Imposta come Giorno di Riposo (0 ore)</span>
-        </label>
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label class="form-label" for="selectShiftType">Tipologia Giornata</label>
+          <select id="selectShiftType" class="form-input" style="font-weight: 600;">
+            <option value="work" ${shift.hasWork ? "selected" : ""}>Turno Lavorativo (Orari specificati)</option>
+            <option value="riposo" ${shift.isRiposo ? "selected" : ""}>Giorno di Riposo (0 ore)</option>
+            <option value="ferie" ${shift.isFerie ? "selected" : ""}>Giorno di Ferie (0 ore)</option>
+          </select>
+        </div>
 
-        <div id="timeInputsContainer" class="form-row-2col" style="${shift.isRiposo ? "display: none;" : ""}">
+        <div id="timeInputsContainer" class="form-row-2col" style="${shift.hasWork ? "" : "display: none;"}">
           <div class="form-group">
             <label class="form-label" for="inputStartTime">Inizio Effettivo</label>
             <input type="time" id="inputStartTime" class="form-input" value="${shift.startTime || '09:00'}">
@@ -1284,7 +1542,7 @@ function openDayDetailModal(dateObj, shift) {
   // Listener per pannello modifica orario
   const btnToggle = document.getElementById("btnToggleEditShift");
   const panel = document.getElementById("editShiftPanel");
-  const chkRiposo = document.getElementById("chkIsRiposo");
+  const selectType = document.getElementById("selectShiftType");
   const timeContainer = document.getElementById("timeInputsContainer");
   const inStart = document.getElementById("inputStartTime");
   const inEnd = document.getElementById("inputEndTime");
@@ -1296,13 +1554,17 @@ function openDayDetailModal(dateObj, shift) {
     panel.style.display = panel.style.display === "none" ? "flex" : "none";
   });
 
-  chkRiposo.addEventListener("change", () => {
-    timeContainer.style.display = chkRiposo.checked ? "none" : "grid";
-  });
+  if (selectType) {
+    selectType.addEventListener("change", () => {
+      timeContainer.style.display = selectType.value === "work" ? "grid" : "none";
+    });
+  }
 
   btnSave.addEventListener("click", () => {
     saveShiftManualChange(shift, {
-      isRiposo: chkRiposo.checked,
+      shiftType: selectType ? selectType.value : "work",
+      isRiposo: selectType ? selectType.value === "riposo" : false,
+      isFerie: selectType ? selectType.value === "ferie" : false,
       startTime: inStart.value,
       endTime: inEnd.value,
       note: inNote.value.trim()
@@ -1336,11 +1598,24 @@ function saveShiftManualChange(shift, changes) {
     shift.originalEndTime = shift.endTime;
     shift.originalTotalHours = shift.totalHours;
     shift.originalIsRiposo = shift.isRiposo;
+    shift.originalIsFerie = shift.isFerie || false;
     shift.originalIsApertura = shift.isApertura;
     shift.originalIsChiusura = shift.isChiusura;
   }
 
-  if (changes.isRiposo) {
+  if (changes.shiftType === "ferie" || changes.isFerie) {
+    shift.isFerie = true;
+    shift.isRiposo = false;
+    shift.hasWork = false;
+    shift.startTime = null;
+    shift.endTime = null;
+    shift.totalHours = 0;
+    shift.overtimeHours = 0;
+    shift.isApertura = false;
+    shift.isChiusura = false;
+    shift.displayHours = "Ferie";
+  } else if (changes.shiftType === "riposo" || changes.isRiposo) {
+    shift.isFerie = false;
     shift.isRiposo = true;
     shift.hasWork = false;
     shift.startTime = null;
@@ -1351,6 +1626,7 @@ function saveShiftManualChange(shift, changes) {
     shift.isChiusura = false;
     shift.displayHours = "Riposo";
   } else {
+    shift.isFerie = false;
     shift.isRiposo = false;
     shift.hasWork = true;
     shift.startTime = changes.startTime;
@@ -1386,12 +1662,13 @@ function revertShiftManualChange(shift) {
     shift.endTime = shift.originalEndTime;
     shift.totalHours = shift.originalTotalHours;
     shift.isRiposo = shift.originalIsRiposo;
+    shift.isFerie = shift.originalIsFerie || false;
     shift.isApertura = shift.originalIsApertura;
     shift.isChiusura = shift.originalIsChiusura;
     shift.overtimeHours = shift.totalHours > 5 ? Math.round((shift.totalHours - 5) * 10) / 10 : 0;
     delete shift.hasCustomOvertime;
-    shift.hasWork = !shift.isRiposo;
-    shift.displayHours = shift.hasWork ? `${shift.startTime} - ${shift.endTime}` : "Riposo";
+    shift.hasWork = !shift.isRiposo && !shift.isFerie;
+    shift.displayHours = shift.isFerie ? "Ferie" : (shift.hasWork ? `${shift.startTime} - ${shift.endTime}` : "Riposo");
   }
   
   delete shift.isManualChange;
@@ -1516,6 +1793,7 @@ function computeStatistics() {
   let totalHours = 0;
   let workDaysCount = 0;
   let restDaysCount = 0;
+  let ferieDaysCount = 0;
   let openingsCount = 0;
   let closingsCount = 0;
   let regularCount = 0;
@@ -1539,7 +1817,9 @@ function computeStatistics() {
     const h = s.totalHours || 0;
     const isSpecial = s.isApertura || s.isChiusura;
     
-    if (s.isRiposo) {
+    if (s.isFerie) {
+      ferieDaysCount++;
+    } else if (s.isRiposo) {
       restDaysCount++;
     } else {
       workDaysCount++;
@@ -1575,13 +1855,16 @@ function computeStatistics() {
         overtimeHours: 0,
         workDays: 0,
         restDays: 0,
+        ferieDays: 0,
         openings: 0,
         closings: 0,
         shifts: []
       };
     }
     weeksMap[wKey].shifts.push(s);
-    if (s.isRiposo) {
+    if (s.isFerie) {
+      weeksMap[wKey].ferieDays++;
+    } else if (s.isRiposo) {
       weeksMap[wKey].restDays++;
     } else {
       weeksMap[wKey].workDays++;
@@ -1608,6 +1891,7 @@ function computeStatistics() {
     totalOvertime: Math.round(totalOvertime * 10) / 10,
     workDaysCount,
     restDaysCount,
+    ferieDaysCount,
     openingsCount,
     closingsCount,
     regularCount,
@@ -1964,6 +2248,35 @@ document.getElementById("conflictModal").addEventListener("click", (e) => {
     closeConflictModal();
   }
 });
+
+// Pulsante per sincronizzazione manuale Firebase Cloud
+const btnManualSync = document.getElementById("btnManualCloudSync");
+if (btnManualSync) {
+  btnManualSync.addEventListener("click", async () => {
+    showToast("Sincronizzazione Cloud in corso...");
+    btnManualSync.disabled = true;
+    try {
+      await initFirebase(HASH_AUTH_KEY);
+      const localRaw = localStorage.getItem("giusy_shifts_payload");
+      if (localRaw) {
+        const localPayload = JSON.parse(localRaw);
+        await syncToFirebase(localPayload);
+      }
+      await reconcileCloudAndLocalShifts();
+      const timeStr = new Date().toLocaleTimeString("it-IT", { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      const lastSyncEl = document.getElementById("lastSyncTimeText");
+      if (lastSyncEl) {
+        lastSyncEl.textContent = `Ultima sincronizzazione: oggi alle ${timeStr}`;
+      }
+      showToast("Dati sincronizzati con successo sul Cloud Firebase!");
+    } catch (err) {
+      console.error("Errore sync manuale:", err);
+      showToast("Errore durante la sincronizzazione cloud.");
+    } finally {
+      btnManualSync.disabled = false;
+    }
+  });
+}
 
 // Pulsante per ribloccare l'app con la password
 document.getElementById("btnLockApp").addEventListener("click", () => {

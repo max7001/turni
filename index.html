@@ -23,6 +23,15 @@
       document.head.appendChild(script);
     }
   </script>
+  <!-- JSZip per la lettura ad alta fedeltà di stili e caselle azzurre Excel -->
+  <script src="./vendor/jszip.min.js"></script>
+  <script>
+    if (typeof JSZip === 'undefined') {
+      const script = document.createElement('script');
+      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+      document.head.appendChild(script);
+    }
+  </script>
 </head>
 <body>
 
@@ -150,6 +159,10 @@
       <div class="legend-item">
         <span class="legend-dot riposo"></span>
         <span>Riposo</span>
+      </div>
+      <div class="legend-item">
+        <span class="legend-dot ferie"></span>
+        <span>Ferie</span>
       </div>
       <div class="legend-item">
         <span class="legend-dot apertura-chiusura"></span>
@@ -547,7 +560,7 @@
             <span class="setting-name">Versione Software</span>
             <span class="setting-desc">Rilasci e aggiornamenti dell'applicazione</span>
           </div>
-          <span class="detail-item-val" style="color: var(--brand-primary);">v1.5.0</span>
+          <span class="detail-item-val" style="color: var(--brand-primary);">v1.6.0</span>
         </div>
         
         <!-- Stato Firebase Cloud -->
@@ -557,6 +570,20 @@
             <span class="setting-desc" id="firebaseStatusText">Sincronizzazione attiva & cifrata</span>
           </div>
           <span class="status-pill" id="firebaseStatusBadge" style="background: var(--riposo-bg); color: var(--riposo-text);">Online</span>
+        </div>
+
+        <!-- Sincronizzazione Manuale Cloud -->
+        <div class="setting-row">
+          <div class="setting-info">
+            <span class="setting-name">Sincronizzazione Cloud</span>
+            <span class="setting-desc" id="lastSyncTimeText">Ultima sincronizzazione: verificata</span>
+          </div>
+          <button type="button" class="icon-btn icon-btn-primary" id="btnManualCloudSync" style="width: auto; padding: 6px 14px; border-radius: var(--radius-sm); font-weight: 600; font-size: 0.82rem; gap: 6px;">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+            </svg>
+            <span>Sincronizza Ora</span>
+          </button>
         </div>
         
         <!-- Blocco Applicazione -->

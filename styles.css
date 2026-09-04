@@ -1,6 +1,6 @@
 /* ==========================================================================
    Gestione Orari - Mobile First CSS Stylesheet
-   Version 1.5.0
+   Version 1.6.0
    ========================================================================== */
 
 :root {
@@ -22,6 +22,11 @@
   --riposo-border: #34d399;
   --riposo-text: #065f46;
   --riposo-badge: #10b981;
+
+  --ferie-bg: #e0f2fe;
+  --ferie-border: #38bdf8;
+  --ferie-text: #0369a1;
+  --ferie-badge: #0284c7;
   
   --speciale-bg: #fef3c7;
   --speciale-border: #fbbf24;
@@ -67,6 +72,11 @@
   --riposo-border: #059669;
   --riposo-text: #6ee7b7;
   --riposo-badge: #10b981;
+
+  --ferie-bg: rgba(3, 105, 161, 0.35);
+  --ferie-border: #0284c7;
+  --ferie-text: #7dd3fc;
+  --ferie-badge: #38bdf8;
   
   --speciale-bg: rgba(120, 53, 15, 0.45);
   --speciale-border: #d97706;
@@ -291,6 +301,11 @@ body {
   box-shadow: 0 0 0 2px var(--riposo-border);
 }
 
+.legend-dot.ferie {
+  background-color: var(--ferie-badge);
+  box-shadow: 0 0 0 2px var(--ferie-border);
+}
+
 .legend-dot.apertura-chiusura {
   background-color: var(--speciale-badge);
   box-shadow: 0 0 0 2px var(--speciale-border);
@@ -400,6 +415,12 @@ body {
   cursor: pointer;
 }
 
+.day-cell.other-month.is-ferie {
+  opacity: 0.8;
+  border-style: dashed;
+  cursor: pointer;
+}
+
 .day-cell.other-month.is-normale {
   opacity: 0.8;
   border-style: dashed;
@@ -449,7 +470,18 @@ body {
   color: var(--riposo-text);
 }
 
-/* 2. APERTURA O CHIUSURA (YELLOW) */
+/* 2. FERIE (AZZURRO) */
+.day-cell.is-ferie {
+  background-color: var(--ferie-bg);
+  border-color: var(--ferie-border);
+  color: var(--ferie-text);
+}
+
+.day-cell.is-ferie .day-number {
+  color: var(--ferie-text);
+}
+
+/* 3. APERTURA O CHIUSURA (YELLOW) */
 .day-cell.is-speciale {
   background-color: var(--speciale-bg);
   border-color: var(--speciale-border);
@@ -510,6 +542,11 @@ body {
 
 .day-badge-tag.tag-riposo {
   background: #059669;
+  color: white;
+}
+
+.day-badge-tag.tag-ferie {
+  background: #0284c7;
   color: white;
 }
 
